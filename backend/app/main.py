@@ -6,6 +6,7 @@ from app.database import init_db
 from app.routers.content import router as content_router
 from app.routers.creator import router as creator_router
 from app.routers.creative import router as creative_router
+from app.routers.orchestration import router as orchestration_router
 from app.routers.research import router as research_router
 from app.services.scheduler_service import start_scheduler
 
@@ -31,6 +32,7 @@ app.include_router(content_router)
 app.include_router(creator_router)
 app.include_router(research_router)
 app.include_router(creative_router)
+app.include_router(orchestration_router)
 
 
 @app.get("/api/health")
