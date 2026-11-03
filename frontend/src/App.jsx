@@ -1,0 +1,1022 @@
+import { useEffect, useMemo, useState } from 'react';
+import {
+  Activity,
+  ArrowUpRight,
+  CheckCheck,
+  CirclePlay,
+  Clock3,
+  Sparkles,
+  TrendingUp,
+  Users,
+} from 'lucide-react';
+import { motion } from 'framer-motion';
+
+import { Sidebar } from './components/Sidebar';
+import { TopNav } from './components/TopNav';
+import { createCreatorProfile, fetchCreatorProfiles, fetchDashboard, runResearchWorkflow } from './api/client';
+import {
+  approveContent,
+  cancelSchedule,
+  createContentItem,
+  fetchContentItems,
+  rejectContent,
+  requestChanges,
+  rescheduleContent,
+  scheduleContent,
+  validateContent,
+} from './api/contentClient';
+import { generateCreative } from './api/creativeClient';
+import { agentStatus, sampleCreator, sidebarItems, workflowSteps } from './data/demoData';
+
+const defaultForm = {
+  name: sampleCreator.name,
+  brand_name: sampleCreator.brand_name,
+  niche: sampleCreator.niche,
+  email: sampleCreator.email,
+  platform_focus: sampleCreator.platform_focus,
+  bio: sampleCreator.bio,
+  website: sampleCreator.website,
+  approved_for_publication: sampleCreator.approved_for_publication,
+  authorized_for_avatar_use: sampleCreator.authorized_for_avatar_use,
+};
+
+function App() {
+  const [formData, setFormData] = useState(defaultForm);
+  const [creator, setCreator] = useState(sampleCreator);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [successMessage, setSuccessMessage] = useState('');
+  const [metrics, setMetrics] = useState({ totalPosts: 24, approved: 14, scheduled: 9, pipeline: 6 });
+  const [researchForm, setResearchForm] = useState({
+    niche: 'creator growth',
+    competitor_urls: 'https://www.youtube.com/results?search_query=creator+growth,https://www.linkedin.com/company/instagram',
+    creator_writing_samples: 'I help creators build simple systems that create repeatable momentum.,The best content strategy is not louder. It is clearer and more consistent.',
+    rss_sources: 'https://rss.nytimes.com/services/xml/rss/nyt/Technology.xml,https://www.theverge.com/rss/index.xml',
+  });
+  const [researchResult, setResearchResult] = useState(null);
+  const [researchLoading, setResearchLoading] = useState(false);
+  const [researchError, setResearchError] = useState('');
+  const [creativeForm, setCreativeForm] = useState({
+    title: 'Creator Growth Playbook',
+    platform: 'Instagram',
+    content: 'A simple system to grow without chasing trends.',
+    script: 'Use a repeatable framework to make clear, consistent content.',
+    captions: 'Hook, Explain, Framework, CTA',
+  });
+  const [creativeResult, setCreativeResult] = useState(null);
+  const [creativeLoading, setCreativeLoading] = useState(false);
+  const [creativeError, setCreativeError] = useState('');
+  const [contentForm, setContentForm] = useState({
+    title: 'Creator Growth Playbook',
+    platform: 'Instagram',
+    content: 'A simple system to grow without chasing trends.',
+    script: 'Use a repeatable framework to make clear, consistent content.',
+    captions: 'Hook, Explain, Framework, CTA',
+    media_path: '/generated/creative/instagram_creator_growth_playbook.png',
+  });
+  const [contentValidation, setContentValidation] = useState(null);
+  const [validationError, setValidationError] = useState('');
+  const [contentQueue, setContentQueue] = useState([]);
+  const [approvalLoading, setApprovalLoading] = useState(false);
+  const [scheduleContentId, setScheduleContentId] = useState('');
+  const [scheduleView, setScheduleView] = useState('weekly');
+  const [scheduleDateTime, setScheduleDateTime] = useState(() => {
+    const nextHour = new Date(Date.now() + 60 * 60 * 1000);
+    return new Date(nextHour.getTime() - nextHour.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+  });
+
+  useEffect(() => {
+    const loadCreator = async () => {
+      try {
+        const profiles = await fetchCreatorProfiles();
+        if (profiles.length > 0) {
+          const latest = profiles[0];
+          setCreator(latest);
+          setFormData({
+            name: latest.name,
+            brand_name: latest.brand_name,
+            niche: latest.niche,
+            email: latest.email,
+            platform_focus: latest.platform_focus,
+            bio: latest.bio || '',
+            website: latest.website || '',
+            approved_for_publication: latest.approved_for_publication,
+            authorized_for_avatar_use: latest.authorized_for_avatar_use,
+          });
+        }
+      } catch (loadError) {
+        setCreator(sampleCreator);
+      }
+
+      try {
+        const dashboard = await fetchDashboard();
+        setMetrics(dashboard);
+      } catch (dashboardError) {
+        setMetrics({ totalPosts: 24, approved: 14, scheduled: 9, pipeline: 6 });
+      }
+
+      try {
+        const items = await fetchContentItems();
+        setContentQueue(items);
+      } catch (queueError) {
+        setContentQueue([]);
+      }
+    };
+
+    loadCreator();
+  }, []);
+
+  const heroCards = useMemo(
+    () => [
+      { label: 'Pipeline health', value: '92%', tone: 'violet' },
+      { label: 'Content approvals', value: '14', tone: 'cyan' },
+      { label: 'Ready to publish', value: '9', tone: 'emerald' },
+    ],
+    [],
+  );
+
+  const handleInputChange = (event) => {
+    const { name, value, type, checked } = event.target;
+    setFormData((previous) => ({
+      ...previous,
+      [name]: type === 'checkbox' ? checked : value,
+    }));
+  };
+
+  const handleSubmit = async (event) => {
+    event.preventDefault();
+    setLoading(true);
+    setError('');
+    setSuccessMessage('');
+
+    try {
+      const savedCreator = await createCreatorProfile(formData);
+      setCreator(savedCreator);
+      setSuccessMessage('Creator profile saved and synced with the backend.');
+    } catch (submitError) {
+      setError(submitError.message || 'Unable to save profile.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleResearchInputChange = (event) => {
+    const { name, value } = event.target;
+    setResearchForm((previous) => ({
+      ...previous,
+      [name]: value,
+    }));
+  };
+
+  const handleResearchSubmit = async (event) => {
+    event.preventDefault();
+    setResearchLoading(true);
+    setResearchError('');
+
+    try {
+      const payload = {
+        niche: researchForm.niche,
+        competitor_urls: researchForm.competitor_urls
+          .split(',')
+          .map((item) => item.trim())
+          .filter(Boolean),
+        creator_writing_samples: researchForm.creator_writing_samples
+          .split(',')
+          .map((item) => item.trim())
+          .filter(Boolean),
+        rss_sources: researchForm.rss_sources
+          .split(',')
+          .map((item) => item.trim())
+          .filter(Boolean),
+      };
+
+      const result = await runResearchWorkflow(payload);
+      setResearchResult(result);
+    } catch (submitError) {
+      setResearchError(submitError.message || 'Research workflow failed.');
+    } finally {
+      setResearchLoading(false);
+    }
+  };
+
+  const handleCreativeInputChange = (event) => {
+    const { name, value } = event.target;
+    setCreativeForm((previous) => ({
+      ...previous,
+      [name]: value,
+    }));
+  };
+
+  const handleCreativeSubmit = async (event) => {
+    event.preventDefault();
+    setCreativeLoading(true);
+    setCreativeError('');
+
+    try {
+      const payload = {
+        title: creativeForm.title,
+        platform: creativeForm.platform,
+        content: creativeForm.content,
+        script: creativeForm.script,
+        captions: creativeForm.captions
+          .split(',')
+          .map((item) => item.trim())
+          .filter(Boolean),
+      };
+
+      const result = await generateCreative(payload);
+      setCreativeResult(result);
+      setContentForm({
+        ...contentForm,
+        title: creativeForm.title,
+        platform: creativeForm.platform,
+        content: creativeForm.content,
+        script: creativeForm.script,
+        captions: creativeForm.captions,
+        media_path: result?.creative?.preview_url || '/generated/creative/instagram_creator_growth_playbook.png',
+      });
+    } catch (submitError) {
+      setCreativeError(submitError.message || 'Creative generation failed.');
+    } finally {
+      setCreativeLoading(false);
+    }
+  };
+
+  const refreshQueue = async () => {
+    try {
+      const items = await fetchContentItems();
+      setContentQueue(items);
+      if (items.length > 0) {
+        setScheduleContentId(items[0].id);
+      }
+    } catch (fetchError) {
+      setContentQueue([]);
+    }
+  };
+
+  const handleContentInputChange = (event) => {
+    const { name, value } = event.target;
+    setContentForm((previous) => ({
+      ...previous,
+      [name]: value,
+    }));
+  };
+
+  const handleValidationSubmit = async (event) => {
+    event.preventDefault();
+    setValidationError('');
+    try {
+      const payload = {
+        title: contentForm.title,
+        platform: contentForm.platform,
+        content: contentForm.content,
+        script: contentForm.script,
+        captions: contentForm.captions
+          .split(',')
+          .map((item) => item.trim())
+          .filter(Boolean),
+        media_path: contentForm.media_path,
+      };
+      const result = await validateContent(payload);
+      setContentValidation(result);
+    } catch (submitError) {
+      setValidationError(submitError.message || 'Validation failed.');
+    }
+  };
+
+  const handleCreateForApproval = async (event) => {
+    event.preventDefault();
+    setValidationError('');
+    try {
+      const payload = {
+        title: contentForm.title,
+        platform: contentForm.platform,
+        content: contentForm.content,
+        script: contentForm.script,
+        captions: contentForm.captions
+          .split(',')
+          .map((item) => item.trim())
+          .filter(Boolean),
+        media_path: contentForm.media_path,
+      };
+      const created = await createContentItem(payload);
+      await refreshQueue();
+      setContentValidation(null);
+      setValidationError('');
+      return created;
+    } catch (submitError) {
+      setValidationError(submitError.message || 'Unable to add content to the review queue.');
+    }
+  };
+
+  const handleApprovalAction = async (contentId, action, notes = '') => {
+    setApprovalLoading(true);
+    try {
+      if (action === 'approve') {
+        await approveContent(contentId, notes, 'creator');
+      } else if (action === 'reject') {
+        await rejectContent(contentId, notes);
+      } else if (action === 'changes') {
+        await requestChanges(contentId, notes);
+      }
+      await refreshQueue();
+    } catch (queueError) {
+      setValidationError(queueError.message || 'Approval action failed.');
+    } finally {
+      setApprovalLoading(false);
+    }
+  };
+
+  const handleScheduleAction = async (event) => {
+    event.preventDefault();
+    setValidationError('');
+
+    if (!scheduleContentId) {
+      setValidationError('Pick an approved item to schedule.');
+      return;
+    }
+
+    try {
+      await scheduleContent(scheduleContentId, new Date(scheduleDateTime).toISOString());
+      await refreshQueue();
+    } catch (submitError) {
+      setValidationError(submitError.message || 'Scheduling failed.');
+    }
+  };
+
+  const calendarDays = Array.from({ length: 7 }, (_, index) => {
+    const date = new Date();
+    date.setDate(date.getDate() + index);
+    return date;
+  });
+
+  const scheduledItems = contentQueue.filter((item) => item.status === 'Scheduled' && item.scheduled_for);
+
+  return (
+    <div className="min-h-screen bg-slate-950 text-slate-100">
+      <div className="flex min-h-screen">
+        <Sidebar items={sidebarItems} />
+
+        <main className="flex-1 overflow-hidden">
+          <TopNav creatorName={creator.name} />
+
+          <div className="space-y-6 p-4 md:p-6 xl:p-8">
+            <section className="rounded-3xl border border-slate-800 bg-gradient-to-br from-slate-900 via-slate-900 to-slate-950 p-6 shadow-2xl shadow-slate-950/40">
+              <div className="flex flex-col gap-6 xl:flex-row xl:items-end xl:justify-between">
+                <div>
+                  <div className="mb-4 inline-flex items-center gap-2 rounded-full border border-violet-500/30 bg-violet-500/10 px-3 py-1 text-xs font-medium uppercase tracking-[0.2em] text-violet-200">
+                    <Sparkles size={14} />
+                    Command center
+                  </div>
+                  <h2 className="text-3xl font-semibold text-white md:text-4xl">AI media operations for {creator.brand_name}</h2>
+                  <p className="mt-2 max-w-2xl text-sm text-slate-300 md:text-base">
+                    Monitor trend discovery, content production, review queues and approval readiness from one operating dashboard.
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <button type="button" className="rounded-xl border border-slate-700 bg-slate-900 px-4 py-2.5 text-sm font-medium text-slate-100 hover:border-slate-500">
+                    View workflow
+                  </button>
+                  <button type="button" className="rounded-xl bg-gradient-to-r from-violet-600 to-cyan-500 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-900/30 hover:brightness-110">
+                    Launch approval review
+                  </button>
+                </div>
+              </div>
+
+              <div className="mt-6 grid gap-4 md:grid-cols-3">
+                {heroCards.map((card) => (
+                  <motion.div
+                    key={card.label}
+                    initial={{ opacity: 0, y: 8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    className={`rounded-2xl border p-4 ${
+                      card.tone === 'violet'
+                        ? 'border-violet-500/30 bg-violet-500/10'
+                        : card.tone === 'cyan'
+                          ? 'border-cyan-500/30 bg-cyan-500/10'
+                          : 'border-emerald-500/30 bg-emerald-500/10'
+                    }`}
+                  >
+                    <p className="text-xs uppercase tracking-[0.2em] text-slate-300">{card.label}</p>
+                    <div className="mt-3 flex items-end justify-between">
+                      <span className="text-3xl font-semibold text-white">{card.value}</span>
+                      <ArrowUpRight className="text-slate-200" size={18} />
+                    </div>
+                  </motion.div>
+                ))}
+              </div>
+            </section>
+
+            <section className="grid gap-6 xl:grid-cols-[1.3fr_0.7fr]">
+              <div className="rounded-3xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-slate-950/30">
+                <div className="mb-4 flex items-center justify-between">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Agent control room</p>
+                    <h3 className="mt-1 text-xl font-semibold text-white">Seven-agent operating status</h3>
+                  </div>
+                  <button type="button" className="rounded-full border border-slate-700 px-3 py-1.5 text-xs font-medium text-slate-200 hover:border-slate-500">
+                    Live overview
+                  </button>
+                </div>
+
+                <div className="grid gap-4 md:grid-cols-2">
+                  {agentStatus.map((agent) => (
+                    <div key={agent.name} className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
+                      <div className="flex items-start justify-between gap-4">
+                        <div>
+                          <p className="text-sm font-medium text-slate-200">{agent.name}</p>
+                          <p className="mt-1 text-xs uppercase tracking-[0.18em] text-violet-300">{agent.status}</p>
+                        </div>
+                        <span className="rounded-full bg-slate-800 px-2.5 py-1 text-xs font-medium text-cyan-300">{agent.score}</span>
+                      </div>
+                      <p className="mt-3 text-sm text-slate-300">{agent.detail}</p>
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <div className="rounded-3xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-slate-950/30">
+                <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Workflow progress</p>
+                <h3 className="mt-1 text-xl font-semibold text-white">Lifecycle snapshot</h3>
+
+                <div className="mt-5 space-y-4">
+                  {workflowSteps.map((step, index) => (
+                    <div key={step.title} className="flex items-start gap-3">
+                      <div className="flex flex-col items-center">
+                        <div className={`flex h-7 w-7 items-center justify-center rounded-full text-xs font-semibold ${
+                          step.progress === 'Complete'
+                            ? 'bg-emerald-500/20 text-emerald-300'
+                            : step.progress === 'In review'
+                              ? 'bg-violet-500/20 text-violet-300'
+                              : step.progress === 'Queued'
+                                ? 'bg-cyan-500/20 text-cyan-300'
+                                : 'bg-slate-700 text-slate-300'
+                        }`}>
+                          {index + 1}
+                        </div>
+                        {index < workflowSteps.length - 1 && <div className="mt-2 h-8 w-px bg-slate-700" />}
+                      </div>
+
+                      <div className="flex-1 rounded-2xl border border-slate-800 bg-slate-950/60 p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="font-medium text-slate-100">{step.title}</p>
+                          <span className="text-xs text-slate-300">{step.progress}</span>
+                        </div>
+                        <div className="mt-2 flex items-center gap-2 text-xs text-slate-400">
+                          <Clock3 size={12} />
+                          {step.time}
+                        </div>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </section>
+
+            <section className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
+              <form onSubmit={handleSubmit} className="rounded-3xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-slate-950/30">
+                <div className="mb-4 flex items-center justify-between">
+                  <div>
+                    <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Creator setup</p>
+                    <h3 className="mt-1 text-xl font-semibold text-white">Profile & approvals</h3>
+                  </div>
+                  <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-xs font-medium text-emerald-300">
+                    {creator.approved_for_publication ? 'Approved' : 'Awaiting approval'}
+                  </span>
+                </div>
+
+                <div className="grid gap-4 md:grid-cols-2">
+                  <label className="space-y-2 text-sm text-slate-300">
+                    <span>Name</span>
+                    <input name="name" value={formData.name} onChange={handleInputChange} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none ring-0 transition focus:border-violet-500" />
+                  </label>
+
+                  <label className="space-y-2 text-sm text-slate-300">
+                    <span>Brand name</span>
+                    <input name="brand_name" value={formData.brand_name} onChange={handleInputChange} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none ring-0 transition focus:border-violet-500" />
+                  </label>
+
+                  <label className="space-y-2 text-sm text-slate-300">
+                    <span>Niche</span>
+                    <input name="niche" value={formData.niche} onChange={handleInputChange} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none ring-0 transition focus:border-violet-500" />
+                  </label>
+
+                  <label className="space-y-2 text-sm text-slate-300">
+                    <span>Primary platform</span>
+                    <select name="platform_focus" value={formData.platform_focus} onChange={handleInputChange} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none transition focus:border-violet-500">
+                      <option>Instagram</option>
+                      <option>YouTube</option>
+                      <option>LinkedIn</option>
+                    </select>
+                  </label>
+
+                  <label className="space-y-2 text-sm text-slate-300 md:col-span-2">
+                    <span>Email</span>
+                    <input name="email" type="email" value={formData.email} onChange={handleInputChange} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none transition focus:border-violet-500" />
+                  </label>
+
+                  <label className="space-y-2 text-sm text-slate-300 md:col-span-2">
+                    <span>Website</span>
+                    <input name="website" value={formData.website} onChange={handleInputChange} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none transition focus:border-violet-500" />
+                  </label>
+
+                  <label className="space-y-2 text-sm text-slate-300 md:col-span-2">
+                    <span>Bio</span>
+                    <textarea name="bio" value={formData.bio} onChange={handleInputChange} rows={4} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none transition focus:border-violet-500" />
+                  </label>
+
+                  <label className="flex items-center gap-3 rounded-2xl border border-slate-800 bg-slate-950/60 p-3 text-sm text-slate-200">
+                    <input type="checkbox" name="approved_for_publication" checked={formData.approved_for_publication} onChange={handleInputChange} className="h-4 w-4 rounded border-slate-600 bg-slate-900 text-violet-500 focus:ring-violet-500" />
+                    Approved for publication
+                  </label>
+
+                  <label className="flex items-center gap-3 rounded-2xl border border-slate-800 bg-slate-950/60 p-3 text-sm text-slate-200">
+                    <input type="checkbox" name="authorized_for_avatar_use" checked={formData.authorized_for_avatar_use} onChange={handleInputChange} className="h-4 w-4 rounded border-slate-600 bg-slate-900 text-violet-500 focus:ring-violet-500" />
+                    Authorized avatar use
+                  </label>
+                </div>
+
+                {error && <p className="mt-4 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">{error}</p>}
+                {successMessage && <p className="mt-4 rounded-xl border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-sm text-emerald-200">{successMessage}</p>}
+
+                <button type="submit" disabled={loading} className="mt-5 inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-cyan-500 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-900/30 disabled:cursor-not-allowed disabled:opacity-60">
+                  {loading ? 'Saving...' : 'Save profile'}
+                </button>
+              </form>
+
+              <div className="rounded-3xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-slate-950/30">
+                <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Research engine</p>
+                <h3 className="mt-1 text-xl font-semibold text-white">Trend and competitor research</h3>
+
+                <form onSubmit={handleResearchSubmit} className="mt-5 space-y-4">
+                  <label className="block text-sm text-slate-300">
+                    <span className="mb-2 block">Niche</span>
+                    <input name="niche" value={researchForm.niche} onChange={handleResearchInputChange} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none transition focus:border-violet-500" />
+                  </label>
+
+                  <label className="block text-sm text-slate-300">
+                    <span className="mb-2 block">Competitor URLs</span>
+                    <textarea name="competitor_urls" value={researchForm.competitor_urls} onChange={handleResearchInputChange} rows={3} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none transition focus:border-violet-500" />
+                  </label>
+
+                  <label className="block text-sm text-slate-300">
+                    <span className="mb-2 block">Creator writing samples</span>
+                    <textarea name="creator_writing_samples" value={researchForm.creator_writing_samples} onChange={handleResearchInputChange} rows={3} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none transition focus:border-violet-500" />
+                  </label>
+
+                  <label className="block text-sm text-slate-300">
+                    <span className="mb-2 block">RSS sources</span>
+                    <textarea name="rss_sources" value={researchForm.rss_sources} onChange={handleResearchInputChange} rows={3} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none transition focus:border-violet-500" />
+                  </label>
+
+                  {researchError && <p className="rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">{researchError}</p>}
+
+                  <button type="submit" disabled={researchLoading} className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-cyan-500 to-violet-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-cyan-950/40 disabled:cursor-not-allowed disabled:opacity-60">
+                    {researchLoading ? 'Running workflow...' : 'Run research workflow'}
+                  </button>
+                </form>
+
+                {researchResult && (
+                  <div className="mt-5 space-y-3 rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
+                    <p className="text-xs uppercase tracking-[0.2em] text-violet-300">Execution state</p>
+                    {researchResult.agent_statuses?.map((item) => (
+                      <div key={item.agent} className="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-900/70 px-3 py-2">
+                        <span className="text-sm text-slate-200">{item.agent}</span>
+                        <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-emerald-300">
+                          {item.status}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="rounded-3xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-slate-950/30">
+                <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Performance snapshot</p>
+                <h3 className="mt-1 text-xl font-semibold text-white">Platform readiness</h3>
+
+                <div className="mt-5 space-y-4">
+                  {[
+                    { label: 'Instagram', value: '80%', border: 'border-violet-400', accent: 'bg-violet-500' },
+                    { label: 'YouTube', value: '68%', border: 'border-cyan-400', accent: 'bg-cyan-500' },
+                    { label: 'LinkedIn', value: '74%', border: 'border-emerald-400', accent: 'bg-emerald-500' },
+                  ].map((platform) => (
+                    <div key={platform.label}>
+                      <div className="mb-2 flex items-center justify-between text-sm text-slate-200">
+                        <span>{platform.label}</span>
+                        <span>{platform.value}</span>
+                      </div>
+                      <div className="h-2.5 rounded-full bg-slate-800">
+                        <div className={`h-2.5 rounded-full ${platform.accent}`} style={{ width: platform.value }} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+
+                <div className="mt-6 grid gap-3 sm:grid-cols-2">
+                  <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
+                    <div className="flex items-center gap-2 text-slate-300">
+                      <TrendingUp size={16} className="text-violet-300" />
+                      Reach trend score
+                    </div>
+                    <p className="mt-3 text-2xl font-semibold text-white">8.7/10</p>
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
+                    <div className="flex items-center gap-2 text-slate-300">
+                      <Users size={16} className="text-cyan-300" />
+                      Audience fit
+                    </div>
+                    <p className="mt-3 text-2xl font-semibold text-white">86%</p>
+                  </div>
+
+                  <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4 sm:col-span-2">
+                    <div className="flex items-center gap-2 text-slate-300">
+                      <CheckCheck size={16} className="text-emerald-300" />
+                      Publication controls
+                    </div>
+                    <p className="mt-3 text-sm text-slate-300">
+                      Approval gate enabled. No publication occurs without creator sign-off and public-source citation review.
+                    </p>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            {researchResult && (
+              <section className="grid gap-6 xl:grid-cols-3">
+                <div className="rounded-3xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-slate-950/30 xl:col-span-1">
+                  <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Ranked topics</p>
+                  <h3 className="mt-1 text-xl font-semibold text-white">Trend suggestions</h3>
+                  <div className="mt-4 space-y-3">
+                    {researchResult.ranked_topic_suggestions?.map((topic, index) => (
+                      <div key={`${topic.title}-${index}`} className="rounded-2xl border border-slate-800 bg-slate-950/60 p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <p className="text-sm font-medium text-slate-100">#{index + 1} {topic.title}</p>
+                          <span className="rounded-full bg-violet-500/10 px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-violet-300">{topic.score}</span>
+                        </div>
+                        <p className="mt-2 text-xs text-slate-300">{topic.why_it_matters}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="rounded-3xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-slate-950/30 xl:col-span-1">
+                  <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Gap analysis</p>
+                  <h3 className="mt-1 text-xl font-semibold text-white">Content opportunities</h3>
+                  <div className="mt-4 space-y-3">
+                    {researchResult.content_gap_suggestions?.map((gap, index) => (
+                      <div key={`${gap.title}-${index}`} className="rounded-2xl border border-slate-800 bg-slate-950/60 p-3">
+                        <p className="text-sm font-medium text-slate-100">{gap.title}</p>
+                        <p className="mt-2 text-xs text-slate-300">{gap.why_it_matters}</p>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                <div className="rounded-3xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-slate-950/30 xl:col-span-1">
+                  <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Hooks</p>
+                  <h3 className="mt-1 text-xl font-semibold text-white">Hook alternatives</h3>
+                  <div className="mt-4 space-y-3">
+                    {researchResult.hook_alternatives?.map((hook, index) => (
+                      <div key={`${hook}-${index}`} className="rounded-2xl border border-slate-800 bg-slate-950/60 p-3 text-sm text-slate-200">
+                        {hook}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              </section>
+            )}
+
+            {creativeResult && (
+              <section className="grid gap-6 xl:grid-cols-2">
+                <div className="rounded-3xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-slate-950/30">
+                  <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Creative preview</p>
+                  <h3 className="mt-1 text-xl font-semibold text-white">Branded media output</h3>
+                  <img
+                    src={creativeResult.creative?.preview_url ? `http://localhost:8001${creativeResult.creative.preview_url}` : ''}
+                    alt="Generated creative preview"
+                    className="mt-4 h-72 w-full rounded-2xl border border-slate-700 object-cover"
+                  />
+                  <p className="mt-3 text-sm text-slate-300">{creativeResult.creative?.limits}</p>
+                </div>
+                <div className="rounded-3xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-slate-950/30">
+                  <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Video render</p>
+                  <h3 className="mt-1 text-xl font-semibold text-white">Export details</h3>
+                  <div className="mt-4 space-y-3 rounded-2xl border border-slate-800 bg-slate-950/60 p-3 text-sm text-slate-200">
+                    <p>Video: {creativeResult.video?.video_path}</p>
+                    <p>Thumbnail: {creativeResult.video?.thumbnail_path}</p>
+                    <p>Subtitles: {creativeResult.video?.subtitle_path}</p>
+                    <p>{creativeResult.video?.limits}</p>
+                  </div>
+                </div>
+              </section>
+            )}
+
+            <section className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
+              <form onSubmit={handleCreativeSubmit} className="rounded-3xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-slate-950/30">
+                <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Creative studio</p>
+                <h3 className="mt-1 text-xl font-semibold text-white">Branded image and short-form video</h3>
+
+                <div className="mt-5 space-y-4">
+                  <label className="block text-sm text-slate-300">
+                    <span className="mb-2 block">Title</span>
+                    <input name="title" value={creativeForm.title} onChange={handleCreativeInputChange} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none transition focus:border-violet-500" />
+                  </label>
+
+                  <label className="block text-sm text-slate-300">
+                    <span className="mb-2 block">Platform</span>
+                    <select name="platform" value={creativeForm.platform} onChange={handleCreativeInputChange} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none transition focus:border-violet-500">
+                      <option>Instagram</option>
+                      <option>YouTube</option>
+                      <option>LinkedIn</option>
+                    </select>
+                  </label>
+
+                  <label className="block text-sm text-slate-300">
+                    <span className="mb-2 block">Creative content</span>
+                    <textarea name="content" value={creativeForm.content} onChange={handleCreativeInputChange} rows={3} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none transition focus:border-violet-500" />
+                  </label>
+
+                  <label className="block text-sm text-slate-300">
+                    <span className="mb-2 block">Narration / script</span>
+                    <textarea name="script" value={creativeForm.script} onChange={handleCreativeInputChange} rows={3} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none transition focus:border-violet-500" />
+                  </label>
+
+                  <label className="block text-sm text-slate-300">
+                    <span className="mb-2 block">Captions</span>
+                    <textarea name="captions" value={creativeForm.captions} onChange={handleCreativeInputChange} rows={2} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none transition focus:border-violet-500" />
+                  </label>
+
+                  {creativeError && <p className="rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">{creativeError}</p>}
+
+                  <button type="submit" disabled={creativeLoading} className="inline-flex items-center gap-2 rounded-xl bg-gradient-to-r from-violet-600 to-cyan-500 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-950/40 disabled:cursor-not-allowed disabled:opacity-60">
+                    {creativeLoading ? 'Rendering...' : 'Generate creative'}
+                  </button>
+                </div>
+              </form>
+
+              <div className="rounded-3xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-slate-950/30">
+                <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Safety controls</p>
+                <h3 className="mt-1 text-xl font-semibold text-white">Avatar and media guardrails</h3>
+
+                <div className="mt-5 space-y-4 text-sm text-slate-300">
+                  <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
+                    <p className="font-medium text-white">Authorized creator media</p>
+                    <p className="mt-2">Upload only creator-authorized image assets before template use.</p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
+                    <p className="font-medium text-white">Synthetic media disclosure</p>
+                    <p className="mt-2">Generated visuals are clearly marked as template-based synthetic media.</p>
+                  </div>
+                  <div className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
+                    <p className="font-medium text-white">No unauthorized cloning</p>
+                    <p className="mt-2">Face or voice cloning never activates without explicit creator authorization.</p>
+                  </div>
+                </div>
+              </div>
+            </section>
+
+            <section className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
+              <form onSubmit={handleValidationSubmit} className="rounded-3xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-slate-950/30">
+                <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Validation gate</p>
+                <h3 className="mt-1 text-xl font-semibold text-white">Content review and approval</h3>
+
+                <div className="mt-5 space-y-4">
+                  <label className="block text-sm text-slate-300">
+                    <span className="mb-2 block">Title</span>
+                    <input name="title" value={contentForm.title} onChange={handleContentInputChange} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none transition focus:border-violet-500" />
+                  </label>
+
+                  <label className="block text-sm text-slate-300">
+                    <span className="mb-2 block">Platform</span>
+                    <select name="platform" value={contentForm.platform} onChange={handleContentInputChange} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none transition focus:border-violet-500">
+                      <option>Instagram</option>
+                      <option>YouTube</option>
+                      <option>LinkedIn</option>
+                    </select>
+                  </label>
+
+                  <label className="block text-sm text-slate-300">
+                    <span className="mb-2 block">Content</span>
+                    <textarea name="content" value={contentForm.content} onChange={handleContentInputChange} rows={4} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none transition focus:border-violet-500" />
+                  </label>
+
+                  <label className="block text-sm text-slate-300">
+                    <span className="mb-2 block">Script</span>
+                    <textarea name="script" value={contentForm.script} onChange={handleContentInputChange} rows={3} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none transition focus:border-violet-500" />
+                  </label>
+
+                  <label className="block text-sm text-slate-300">
+                    <span className="mb-2 block">Captions</span>
+                    <textarea name="captions" value={contentForm.captions} onChange={handleContentInputChange} rows={2} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none transition focus:border-violet-500" />
+                  </label>
+
+                  <label className="block text-sm text-slate-300">
+                    <span className="mb-2 block">Media path</span>
+                    <input name="media_path" value={contentForm.media_path} onChange={handleContentInputChange} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none transition focus:border-violet-500" />
+                  </label>
+
+                  {validationError && <p className="rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">{validationError}</p>}
+
+                  <div className="flex flex-wrap gap-3">
+                    <button type="submit" className="rounded-xl bg-gradient-to-r from-violet-600 to-cyan-500 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-950/40">Validate</button>
+                    <button type="button" onClick={handleCreateForApproval} className="rounded-xl border border-slate-700 bg-slate-900 px-4 py-2.5 text-sm font-medium text-slate-100 hover:border-slate-500">Add to approval queue</button>
+                  </div>
+                </div>
+
+                {contentValidation && (
+                  <div className="mt-5 rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <p className="text-xs uppercase tracking-[0.2em] text-violet-300">Validation result</p>
+                      <span className={`rounded-full px-2 py-1 text-[10px] uppercase tracking-[0.18em] ${contentValidation.status === 'passed' ? 'bg-emerald-500/20 text-emerald-300' : 'bg-amber-500/20 text-amber-300'}`}>
+                        {contentValidation.status}
+                      </span>
+                    </div>
+
+                    {contentValidation.errors.length > 0 && (
+                      <div className="mt-3 space-y-2 text-sm text-red-200">
+                        <p className="font-medium">Errors</p>
+                        {contentValidation.errors.map((item) => (
+                          <li key={item} className="list-inside list-disc">{item}</li>
+                        ))}
+                      </div>
+                    )}
+
+                    {contentValidation.warnings.length > 0 && (
+                      <div className="mt-3 space-y-2 text-sm text-amber-200">
+                        <p className="font-medium">Warnings</p>
+                        {contentValidation.warnings.map((item) => (
+                          <li key={item} className="list-inside list-disc">{item}</li>
+                        ))}
+                      </div>
+                    )}
+
+                    {contentValidation.platform_checks.length > 0 && (
+                      <div className="mt-3 text-sm text-slate-300">
+                        <p className="font-medium text-slate-200">Platform checks</p>
+                        <ul className="mt-2 list-inside list-disc space-y-1">
+                          {contentValidation.platform_checks.map((item) => <li key={item}>{item}</li>)}
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </form>
+
+              <div className="rounded-3xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-slate-950/30">
+                <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Approval queue</p>
+                <h3 className="mt-1 text-xl font-semibold text-white">Human review board</h3>
+
+                {contentQueue.length === 0 ? (
+                  <div className="mt-5 rounded-2xl border border-dashed border-slate-700 bg-slate-950/40 p-5 text-sm text-slate-300">
+                    No content is in the review queue yet.
+                  </div>
+                ) : (
+                  <div className="mt-5 space-y-3">
+                    {contentQueue.map((item) => (
+                      <div key={item.id} className="rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <p className="font-medium text-white">{item.title}</p>
+                            <p className="mt-1 text-xs uppercase tracking-[0.18em] text-violet-300">{item.platform} · {item.status}</p>
+                          </div>
+                          <span className="rounded-full border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-200">{item.status}</span>
+                        </div>
+
+                        {item.validation_errors?.length > 0 && (
+                          <ul className="mt-3 list-inside list-disc text-sm text-red-200">
+                            {item.validation_errors.map((error) => <li key={`${item.id}-${error}`}>{error}</li>)}
+                          </ul>
+                        )}
+
+                        {item.validation_warnings?.length > 0 && (
+                          <ul className="mt-2 list-inside list-disc text-sm text-amber-200">
+                            {item.validation_warnings.map((warning) => <li key={`${item.id}-${warning}`}>{warning}</li>)}
+                          </ul>
+                        )}
+
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          <button type="button" onClick={() => handleApprovalAction(item.id, 'approve')} disabled={approvalLoading} className="rounded-lg bg-emerald-500/20 px-3 py-1.5 text-xs font-medium text-emerald-200 disabled:opacity-50">Approve</button>
+                          <button type="button" onClick={() => handleApprovalAction(item.id, 'reject')} disabled={approvalLoading} className="rounded-lg bg-red-500/20 px-3 py-1.5 text-xs font-medium text-red-200 disabled:opacity-50">Reject</button>
+                          <button type="button" onClick={() => handleApprovalAction(item.id, 'changes')} disabled={approvalLoading} className="rounded-lg bg-amber-500/20 px-3 py-1.5 text-xs font-medium text-amber-200 disabled:opacity-50">Request changes</button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </section>
+
+            <section className="rounded-3xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-slate-950/30">
+              <div className="flex flex-col gap-4 md:flex-row md:items-center md:justify-between">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Publishing calendar</p>
+                  <h3 className="mt-1 text-xl font-semibold text-white">Schedule and monitor delivery</h3>
+                </div>
+
+                <div className="flex gap-2">
+                  <button type="button" onClick={() => setScheduleView('daily')} className={`rounded-lg px-3 py-1.5 text-xs font-medium ${scheduleView === 'daily' ? 'bg-violet-500/20 text-violet-200' : 'border border-slate-700 bg-slate-950 text-slate-200'}`}>
+                    Daily
+                  </button>
+                  <button type="button" onClick={() => setScheduleView('weekly')} className={`rounded-lg px-3 py-1.5 text-xs font-medium ${scheduleView === 'weekly' ? 'bg-violet-500/20 text-violet-200' : 'border border-slate-700 bg-slate-950 text-slate-200'}`}>
+                    Weekly
+                  </button>
+                </div>
+              </div>
+
+              <form onSubmit={handleScheduleAction} className="mt-5 flex flex-col gap-3 md:flex-row md:items-end">
+                <label className="flex-1 text-sm text-slate-300">
+                  <span className="mb-2 block">Approved content</span>
+                  <select value={scheduleContentId} onChange={(event) => setScheduleContentId(event.target.value)} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none transition focus:border-violet-500">
+                    <option value="">Select item</option>
+                    {contentQueue.filter((item) => item.status === 'Approved' || item.status === 'Scheduled').map((item) => (
+                      <option key={item.id} value={item.id}>{item.title}</option>
+                    ))}
+                  </select>
+                </label>
+
+                <label className="flex-1 text-sm text-slate-300">
+                  <span className="mb-2 block">Schedule time</span>
+                  <input type="datetime-local" value={scheduleDateTime} onChange={(event) => setScheduleDateTime(event.target.value)} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none transition focus:border-violet-500" />
+                </label>
+
+                <button type="submit" className="rounded-xl bg-gradient-to-r from-cyan-500 to-violet-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-cyan-950/30">Schedule</button>
+              </form>
+
+              <div className="mt-6 grid gap-4 md:grid-cols-7">
+                {calendarDays.map((day) => {
+                  const key = day.toISOString().slice(0, 10);
+                  const itemsForDay = scheduledItems.filter((item) => {
+                    if (!item.scheduled_for) return false;
+                    return new Date(item.scheduled_for).toISOString().slice(0, 10) === key;
+                  });
+
+                  return (
+                    <div key={key} className="rounded-2xl border border-slate-800 bg-slate-950/50 p-3">
+                      <p className="text-xs uppercase tracking-[0.18em] text-slate-400">{day.toLocaleDateString('en-US', { weekday: 'short' })}</p>
+                      <p className="mt-2 text-lg font-semibold text-white">{day.getDate()}</p>
+                      <div className="mt-3 space-y-2">
+                        {itemsForDay.length === 0 ? (
+                          <p className="text-xs text-slate-500">No schedule</p>
+                        ) : (
+                          itemsForDay.map((item) => (
+                            <div key={item.id} className="rounded-xl border border-violet-500/30 bg-violet-500/10 p-2 text-[11px] text-slate-100">
+                              <p className="font-medium">{item.title}</p>
+                              <p className="mt-1 text-violet-200">{item.platform}</p>
+                              <div className="mt-2 flex gap-2">
+                                <button type="button" onClick={() => { setScheduleContentId(String(item.id)); setScheduleDateTime(new Date(item.scheduled_for).toISOString().slice(0, 16)); }} className="rounded-md border border-slate-700 px-2 py-1 text-[10px] text-slate-200">Edit</button>
+                                <button type="button" onClick={async () => { await cancelSchedule(item.id); await refreshQueue(); }} className="rounded-md border border-red-500/40 px-2 py-1 text-[10px] text-red-200">Cancel</button>
+                              </div>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </section>
+
+            <section className="grid gap-6 md:grid-cols-4">
+              <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4">
+                <div className="flex items-center gap-2 text-slate-300">
+                  <Activity size={16} className="text-violet-300" />
+                  Total posts
+                </div>
+                <p className="mt-3 text-3xl font-semibold text-white">{metrics.totalPosts}</p>
+              </div>
+
+              <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4">
+                <div className="flex items-center gap-2 text-slate-300">
+                  <CheckCheck size={16} className="text-emerald-300" />
+                  Approved
+                </div>
+                <p className="mt-3 text-3xl font-semibold text-white">{metrics.approved}</p>
+              </div>
+
+              <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4">
+                <div className="flex items-center gap-2 text-slate-300">
+                  <CirclePlay size={16} className="text-cyan-300" />
+                  Scheduled
+                </div>
+                <p className="mt-3 text-3xl font-semibold text-white">{metrics.scheduled}</p>
+              </div>
+
+              <div className="rounded-2xl border border-slate-800 bg-slate-900/80 p-4">
+                <div className="flex items-center gap-2 text-slate-300">
+                  <Sparkles size={16} className="text-amber-300" />
+                  In pipeline
+                </div>
+                <p className="mt-3 text-3xl font-semibold text-white">{metrics.pipeline}</p>
+              </div>
+            </section>
+          </div>
+        </main>
+      </div>
+    </div>
+  );
+}
+
+export default App;
