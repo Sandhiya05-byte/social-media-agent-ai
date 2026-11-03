@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from app.orchestration.orchestrator import CentralAgentOrchestrator
+from app.orchestration.workflow_engine import WorkflowEngine
 
 router = APIRouter(prefix="/api/orchestration", tags=["orchestration"])
 
@@ -59,3 +60,28 @@ def get_workflow_status(workflow_id: int):
         "error_message": workflow.error_message,
         "execution_summary": workflow.execution_summary,
     }
+
+
+@router.post("/workflows/{workflow_id}/retry")
+def retry_workflow(workflow_id: int):
+    from app.orchestration.execution_manager import ExecutionManager
+
+    manager = ExecutionManager()
+    workflow = manager.get_workflow(workflow_id)
+    if workflow is None:
+        raise HTTPException(status_code=404, detail="Workflow not found.")
+
+    try:
+        engine = WorkflowEngine()
+        context = engine.resume_workflow(workflow_id)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+    return {"workflow_id": workflow_id, "status": context.workflow_id is not None and manager.get_workflow(workflow_id).status or "FAILED", "context": context.to_dict()}
+
+
+@router.post("/workflows/{workflow_id}/resume")
+def resume_workflow(workflow_id: int):
+    return retry_workflow(workflow_id)

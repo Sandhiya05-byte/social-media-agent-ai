@@ -377,3 +377,166 @@ def test_no_agent_execution_row_stays_completed_when_checkpoint_failed(tmp_path,
         rows = session.query(AgentExecution).filter_by(workflow_id=context.workflow_id).all()
     assert rows
     assert all(row.status != "COMPLETED" for row in rows)
+
+
+def test_resume_workflow_retries_only_failed_agent_and_preserves_completed_outputs(tmp_path, monkeypatch):
+    manager = _create_isolated_execution_manager(tmp_path, monkeypatch)
+
+    class FirstSuccessAgent:
+        name = "Trend Research Agent"
+        calls = 0
+
+        def execute(self, **kwargs):
+            type(self).calls += 1
+            return {
+                "status": "completed",
+                "ranked_topic_suggestions": [{"title": "initial topic", "score": 91}],
+                "source_urls": ["https://example.com/rss-resume"],
+            }
+
+    class FlakyAgent:
+        calls = 0
+
+        def execute(self, **kwargs):
+            type(self).calls += 1
+            if type(self).calls == 1:
+                raise RuntimeError("retry required")
+            return {"status": "completed", "hook_alternatives": ["Resume after retry"]}
+
+    class FinalSuccessAgent:
+        name = "Hook Generation Agent"
+        calls = 0
+
+        def execute(self, **kwargs):
+            type(self).calls += 1
+            return {"status": "completed", "hook_alternatives": ["Recovered hook"]}
+
+    class DummyRegistry:
+        def register_default_agents(self):
+            return None
+
+        def execution_order(self):
+            return ["Trend Research Agent", "Failing Agent", "Hook Generation Agent"]
+
+        def get(self, name):
+            if name == "Trend Research Agent":
+                return FirstSuccessAgent()
+            if name == "Failing Agent":
+                return FlakyAgent()
+            if name == "Hook Generation Agent":
+                return FinalSuccessAgent()
+            raise KeyError(name)
+
+    engine = WorkflowEngine(registry=DummyRegistry(), execution_manager=manager)
+    context = WorkflowContext(campaign_topic="retry resume", platforms=["Instagram"])
+    result = engine.run(context)
+
+    workflow = manager.get_workflow(context.workflow_id)
+    assert workflow is not None
+    assert workflow.status == "FAILED"
+    assert result.error_message == "retry required"
+
+    resumed = engine.resume_workflow(workflow.id)
+    assert resumed.workflow_id == workflow.id
+    assert resumed.hooks == ["Recovered hook"]
+    assert FirstSuccessAgent.calls == 1
+    assert FlakyAgent.calls == 2
+    assert FinalSuccessAgent.calls == 1
+
+
+def test_retry_count_increments_when_retry_attempt_starts(tmp_path, monkeypatch):
+    manager = _create_isolated_execution_manager(tmp_path, monkeypatch)
+
+    class SuccessAgent:
+        def execute(self, **kwargs):
+            return {"status": "completed", "ranked_topic_suggestions": [{"title": "stable topic", "score": 90}], "source_urls": ["https://example.com/rss-retry"]}
+
+    class FlakyAgent:
+        calls = 0
+
+        def execute(self, **kwargs):
+            type(self).calls += 1
+            if type(self).calls == 1:
+                raise RuntimeError("need retry")
+            return {"status": "completed", "hook_alternatives": ["recovered hook"]}
+
+    class DummyRegistry:
+        def register_default_agents(self):
+            return None
+
+        def execution_order(self):
+            return ["Trend Research Agent", "Failing Agent"]
+
+        def get(self, name):
+            if name == "Trend Research Agent":
+                return SuccessAgent()
+            if name == "Failing Agent":
+                return FlakyAgent()
+            raise KeyError(name)
+
+    engine = WorkflowEngine(registry=DummyRegistry(), execution_manager=manager)
+    context = WorkflowContext(campaign_topic="retry counts", platforms=["Instagram"])
+    result = engine.run(context)
+
+    workflow = manager.get_workflow(context.workflow_id)
+    assert workflow is not None
+    assert workflow.status == "FAILED"
+    assert result.error_message == "need retry"
+
+    resumed = engine.resume_workflow(workflow.id)
+    execution = manager.get_agent_execution(workflow.id, "Failing Agent")
+    assert execution is not None
+    assert execution.status == "COMPLETED"
+    assert execution.retry_count == 1
+    assert execution.output_data["hook_alternatives"] == ["recovered hook"]
+    assert resumed.workflow_id == workflow.id
+
+
+def test_retry_limit_is_enforced_before_retry_is_allowed(tmp_path, monkeypatch):
+    manager = _create_isolated_execution_manager(tmp_path, monkeypatch)
+
+    class SuccessAgent:
+        def execute(self, **kwargs):
+            return {"status": "completed", "ranked_topic_suggestions": [{"title": "limit topic", "score": 80}], "source_urls": ["https://example.com/rss-limit"]}
+
+    class FlakyAgent:
+        calls = 0
+
+        def execute(self, **kwargs):
+            type(self).calls += 1
+            raise RuntimeError("limit reached")
+
+    class DummyRegistry:
+        def register_default_agents(self):
+            return None
+
+        def execution_order(self):
+            return ["Trend Research Agent", "Failing Agent"]
+
+        def get(self, name):
+            if name == "Trend Research Agent":
+                return SuccessAgent()
+            if name == "Failing Agent":
+                return FlakyAgent()
+            raise KeyError(name)
+
+    engine = WorkflowEngine(registry=DummyRegistry(), execution_manager=manager)
+    context = WorkflowContext(campaign_topic="retry limit", platforms=["Instagram"])
+    result = engine.run(context)
+
+    workflow = manager.get_workflow(context.workflow_id)
+    assert workflow is not None
+    assert workflow.status == "FAILED"
+    assert result.error_message == "limit reached"
+
+    with manager.session_factory() as session:
+        execution = session.query(AgentExecution).filter_by(workflow_id=workflow.id, agent_name="Failing Agent").order_by(AgentExecution.id.desc()).first()
+        execution.retry_count = 1
+        session.commit()
+
+    with pytest.raises(RuntimeError, match="Retry limit of 1 reached"):
+        engine.resume_workflow(workflow.id, retry_limit=1)
+
+    execution = manager.get_agent_execution(workflow.id, "Failing Agent")
+    assert execution is not None
+    assert execution.retry_count == 1

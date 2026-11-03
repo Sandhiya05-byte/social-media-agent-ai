@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime
 from typing import Any
 
@@ -24,6 +25,19 @@ class ExecutionManager:
         if isinstance(value, (list, tuple, set)):
             return [ExecutionManager._json_safe(item) for item in value]
         return str(value)
+
+    @contextmanager
+    def workflow_retry_lock(self, workflow_id: int):
+        with self.session_factory() as session:
+            session.connection().exec_driver_sql("BEGIN IMMEDIATE")
+            workflow = session.get(Workflow, workflow_id)
+            try:
+                yield workflow, session
+            except Exception:
+                session.rollback()
+                raise
+            else:
+                session.commit()
 
     def create_workflow(self, context) -> Workflow:
         with self.session_factory() as session:
@@ -51,8 +65,11 @@ class ExecutionManager:
         error_message: str | None = None,
         execution_summary: dict[str, Any] | None = None,
         checkpoint_data: dict[str, Any] | None = None,
+        session=None,
     ) -> None:
-        with self.session_factory() as session:
+        owns_session = session is None
+        session = session or self.session_factory()
+        try:
             workflow = session.get(Workflow, workflow_id)
             if workflow is None:
                 return
@@ -64,7 +81,11 @@ class ExecutionManager:
             workflow.updated_at = datetime.utcnow()
             if status in {"COMPLETED", "FAILED", "CANCELLED"}:
                 workflow.completed_at = datetime.utcnow()
-            session.commit()
+            if owns_session:
+                session.commit()
+        finally:
+            if owns_session:
+                session.close()
 
     def save_workflow_checkpoint(
         self,
@@ -74,8 +95,11 @@ class ExecutionManager:
         status: str | None = None,
         error_message: str | None = None,
         execution_summary: dict[str, Any] | None = None,
+        session=None,
     ) -> Workflow | None:
-        with self.session_factory() as session:
+        owns_session = session is None
+        session = session or self.session_factory()
+        try:
             workflow = session.get(Workflow, workflow_id)
             if workflow is None:
                 return None
@@ -95,12 +119,18 @@ class ExecutionManager:
                 workflow.error_message = error_message
             if execution_summary is not None and status is None:
                 workflow.execution_summary = self._json_safe(execution_summary)
-            session.commit()
+            if owns_session:
+                session.commit()
             session.refresh(workflow)
             return workflow
+        finally:
+            if owns_session:
+                session.close()
 
-    def get_workflow_context(self, workflow_id: int) -> WorkflowContext | None:
-        with self.session_factory() as session:
+    def get_workflow_context(self, workflow_id: int, session=None) -> WorkflowContext | None:
+        owns_session = session is None
+        session = session or self.session_factory()
+        try:
             workflow = session.get(Workflow, workflow_id)
             if workflow is None:
                 return None
@@ -116,9 +146,14 @@ class ExecutionManager:
                 content_type=workflow.content_type,
                 approval_status=workflow.status if workflow.status in {"APPROVED", "REJECTED", "SCHEDULED", "COMPLETED"} else "PENDING",
             )
+        finally:
+            if owns_session:
+                session.close()
 
-    def add_agent_execution(self, workflow_id: int, agent_name: str, status: str, input_data: dict[str, Any], output_data: dict[str, Any] | None = None, started_at: datetime | None = None, completed_at: datetime | None = None, execution_duration: int = 0, error_message: str | None = None) -> AgentExecution:
-        with self.session_factory() as session:
+    def add_agent_execution(self, workflow_id: int, agent_name: str, status: str, input_data: dict[str, Any], output_data: dict[str, Any] | None = None, started_at: datetime | None = None, completed_at: datetime | None = None, execution_duration: int = 0, error_message: str | None = None, session=None) -> AgentExecution:
+        owns_session = session is None
+        session = session or self.session_factory()
+        try:
             record = AgentExecution(
                 workflow_id=workflow_id,
                 agent_name=agent_name,
@@ -131,9 +166,14 @@ class ExecutionManager:
                 error_message=error_message,
             )
             session.add(record)
-            session.commit()
+            session.flush()
+            if owns_session:
+                session.commit()
             session.refresh(record)
             return record
+        finally:
+            if owns_session:
+                session.close()
 
     def update_agent_execution(
         self,
@@ -145,9 +185,13 @@ class ExecutionManager:
         started_at: datetime | None = None,
         completed_at: datetime | None = None,
         execution_duration: int | None = None,
+        retry_count: int | None = None,
         error_message: str | None = None,
+        session=None,
     ) -> AgentExecution | None:
-        with self.session_factory() as session:
+        owns_session = session is None
+        session = session or self.session_factory()
+        try:
             record = session.get(AgentExecution, execution_id)
             if record is None:
                 return None
@@ -163,21 +207,52 @@ class ExecutionManager:
                 record.completed_at = completed_at
             if execution_duration is not None:
                 record.execution_duration = execution_duration
+            if retry_count is not None:
+                record.retry_count = retry_count
             if error_message is not None:
                 record.error_message = error_message
-            session.commit()
+            if owns_session:
+                session.commit()
+            session.flush()
             session.refresh(record)
             return record
+        finally:
+            if owns_session:
+                session.close()
 
-    def get_agent_execution(self, workflow_id: int, agent_name: str) -> AgentExecution | None:
-        with self.session_factory() as session:
+    def get_agent_execution(self, workflow_id: int, agent_name: str, session=None) -> AgentExecution | None:
+        owns_session = session is None
+        session = session or self.session_factory()
+        try:
             return (
                 session.query(AgentExecution)
                 .filter(AgentExecution.workflow_id == workflow_id, AgentExecution.agent_name == agent_name)
                 .order_by(AgentExecution.id.desc())
                 .first()
             )
+        finally:
+            if owns_session:
+                session.close()
 
-    def get_workflow(self, workflow_id: int) -> Workflow | None:
-        with self.session_factory() as session:
+    def list_agent_executions(self, workflow_id: int, session=None) -> list[AgentExecution]:
+        owns_session = session is None
+        session = session or self.session_factory()
+        try:
+            return (
+                session.query(AgentExecution)
+                .filter(AgentExecution.workflow_id == workflow_id)
+                .order_by(AgentExecution.id.asc())
+                .all()
+            )
+        finally:
+            if owns_session:
+                session.close()
+
+    def get_workflow(self, workflow_id: int, session=None) -> Workflow | None:
+        owns_session = session is None
+        session = session or self.session_factory()
+        try:
             return session.get(Workflow, workflow_id)
+        finally:
+            if owns_session:
+                session.close()
