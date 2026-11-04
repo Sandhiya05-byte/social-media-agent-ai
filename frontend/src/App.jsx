@@ -26,6 +26,7 @@ import {
   validateContent,
 } from './api/contentClient';
 import { generateCreative } from './api/creativeClient';
+import { fetchWorkflowStatus, runWorkflow } from './api/orchestrationClient';
 import { agentStatus, sampleCreator, sidebarItems, workflowSteps } from './data/demoData';
 
 const defaultForm = {
@@ -56,6 +57,17 @@ function App() {
   const [researchResult, setResearchResult] = useState(null);
   const [researchLoading, setResearchLoading] = useState(false);
   const [researchError, setResearchError] = useState('');
+  const [workflowForm, setWorkflowForm] = useState({
+    campaign_topic: 'Creator growth systems',
+    target_audience: 'new creators',
+    platforms: 'Instagram,YouTube',
+    campaign_objective: 'Build clear educational content without overproduction.',
+    content_type: 'short-form',
+  });
+  const [workflowResult, setWorkflowResult] = useState(null);
+  const [workflowHistory, setWorkflowHistory] = useState([]);
+  const [workflowLoading, setWorkflowLoading] = useState(false);
+  const [workflowError, setWorkflowError] = useState('');
   const [creativeForm, setCreativeForm] = useState({
     title: 'Creator Growth Playbook',
     platform: 'Instagram',
@@ -125,6 +137,90 @@ function App() {
 
     loadCreator();
   }, []);
+
+  useEffect(() => {
+    if (!workflowResult?.workflow_id) {
+      return undefined;
+    }
+
+    let cancelled = false;
+    let timer = null;
+    let inFlight = false;
+
+    const terminalStatuses = new Set(['COMPLETED', 'FAILED', 'CANCELLED', 'REJECTED', 'SCHEDULED']);
+
+    const stopPolling = () => {
+      cancelled = true;
+      if (timer) {
+        clearInterval(timer);
+        timer = null;
+      }
+    };
+
+    const pollWorkflow = async () => {
+      if (inFlight || cancelled) {
+        return;
+      }
+
+      inFlight = true;
+
+      try {
+        const latest = await fetchWorkflowStatus(workflowResult.workflow_id);
+        if (cancelled) {
+          return;
+        }
+
+        const normalizedStatus = String(latest?.status ?? '').toUpperCase();
+        if (terminalStatuses.has(normalizedStatus)) {
+          stopPolling();
+          setWorkflowResult((previous) => {
+            if (!previous) {
+              return previous;
+            }
+
+            return {
+              ...previous,
+              status: normalizedStatus,
+              context: {
+                ...(previous.context || {}),
+                ...(latest.execution_summary ? { execution_summary: latest.execution_summary } : {}),
+              },
+            };
+          });
+          return;
+        }
+
+        setWorkflowResult((previous) => {
+          if (!previous) {
+            return previous;
+          }
+
+          return {
+            ...previous,
+            status: normalizedStatus,
+            context: {
+              ...(previous.context || {}),
+              ...(latest.execution_summary ? { execution_summary: latest.execution_summary } : {}),
+            },
+          };
+        });
+      } catch (pollError) {
+        const statusCode = pollError?.response?.status ?? pollError?.status;
+        if (statusCode === 404) {
+          stopPolling();
+        }
+      } finally {
+        inFlight = false;
+      }
+    };
+
+    pollWorkflow();
+    timer = setInterval(pollWorkflow, 4000);
+
+    return () => {
+      stopPolling();
+    };
+  }, [workflowResult?.workflow_id]);
 
   const heroCards = useMemo(
     () => [
@@ -196,6 +292,56 @@ function App() {
       setResearchError(submitError.message || 'Research workflow failed.');
     } finally {
       setResearchLoading(false);
+    }
+  };
+
+  const handleWorkflowInputChange = (event) => {
+    const { name, value } = event.target;
+    setWorkflowForm((previous) => ({
+      ...previous,
+      [name]: value,
+    }));
+  };
+
+  const handleWorkflowSubmit = async (event) => {
+    event.preventDefault();
+    setWorkflowLoading(true);
+    setWorkflowError('');
+
+    try {
+      const payload = {
+        campaign_topic: workflowForm.campaign_topic,
+        target_audience: workflowForm.target_audience,
+        platforms: workflowForm.platforms
+          .split(',')
+          .map((item) => item.trim())
+          .filter(Boolean),
+        campaign_objective: workflowForm.campaign_objective,
+        content_type: workflowForm.content_type,
+        competitor_urls: researchResult?.competitor_observations
+          ? researchResult.competitor_observations.map((item) => item.source_url || '').filter(Boolean)
+          : [],
+        rss_sources: researchResult?.agent_statuses
+          ? researchResult.agent_statuses
+              .flatMap((agent) => agent.source_urls || [])
+              .filter(Boolean)
+          : [],
+        creator_writing_samples: researchForm.creator_writing_samples
+          .split(',')
+          .map((item) => item.trim())
+          .filter(Boolean),
+      };
+
+      const result = await runWorkflow(payload);
+      setWorkflowResult(result);
+      setWorkflowHistory((previous) => [
+        { workflow_id: result.workflow_id, status: result.status },
+        ...previous.filter((item) => item.workflow_id !== result.workflow_id),
+      ].slice(0, 5));
+    } catch (submitError) {
+      setWorkflowError(submitError.message || 'Workflow orchestration failed.');
+    } finally {
+      setWorkflowLoading(false);
     }
   };
 
@@ -344,6 +490,10 @@ function App() {
     }
   };
 
+  const workflowAgents = workflowResult?.context?.agent_records
+    ? Object.entries(workflowResult.context.agent_records)
+    : [];
+
   const calendarDays = Array.from({ length: 7 }, (_, index) => {
     const date = new Date();
     date.setDate(date.getDate() + index);
@@ -472,6 +622,113 @@ function App() {
                   ))}
                 </div>
               </div>
+            </section>
+
+            <section className="rounded-3xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-slate-950/30">
+              <div className="mb-5 flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+                <div>
+                  <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Orchestration engine</p>
+                  <h3 className="mt-1 text-xl font-semibold text-white">Campaign workflow monitor</h3>
+                </div>
+                <span className="rounded-full border border-cyan-500/30 bg-cyan-500/10 px-2 py-1 text-[10px] font-medium uppercase tracking-[0.2em] text-cyan-300">
+                  seven-agent mode
+                </span>
+              </div>
+
+              <form onSubmit={handleWorkflowSubmit} className="grid gap-4 md:grid-cols-2">
+                <label className="block text-sm text-slate-300">
+                  <span className="mb-2 block">Campaign topic</span>
+                  <input name="campaign_topic" value={workflowForm.campaign_topic} onChange={handleWorkflowInputChange} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none transition focus:border-violet-500" />
+                </label>
+
+                <label className="block text-sm text-slate-300">
+                  <span className="mb-2 block">Target audience</span>
+                  <input name="target_audience" value={workflowForm.target_audience} onChange={handleWorkflowInputChange} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none transition focus:border-violet-500" />
+                </label>
+
+                <label className="block text-sm text-slate-300 md:col-span-2">
+                  <span className="mb-2 block">Platforms</span>
+                  <input name="platforms" value={workflowForm.platforms} onChange={handleWorkflowInputChange} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none transition focus:border-violet-500" />
+                </label>
+
+                <label className="block text-sm text-slate-300 md:col-span-2">
+                  <span className="mb-2 block">Campaign objective</span>
+                  <input name="campaign_objective" value={workflowForm.campaign_objective} onChange={handleWorkflowInputChange} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none transition focus:border-violet-500" />
+                </label>
+
+                <label className="block text-sm text-slate-300">
+                  <span className="mb-2 block">Content type</span>
+                  <select name="content_type" value={workflowForm.content_type} onChange={handleWorkflowInputChange} className="w-full rounded-xl border border-slate-700 bg-slate-950 px-3 py-2.5 text-white outline-none transition focus:border-violet-500">
+                    <option value="short-form">Short-form</option>
+                    <option value="carousel">Carousel</option>
+                    <option value="long-form">Long-form</option>
+                  </select>
+                </label>
+
+                <div className="flex items-end">
+                  <button type="submit" disabled={workflowLoading} className="w-full rounded-xl bg-gradient-to-r from-violet-600 to-cyan-500 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-violet-900/30 disabled:cursor-not-allowed disabled:opacity-60">
+                    {workflowLoading ? 'Running workflow...' : 'Run orchestration'}
+                  </button>
+                </div>
+              </form>
+
+              {workflowError && <p className="mt-4 rounded-xl border border-red-500/30 bg-red-500/10 px-3 py-2 text-sm text-red-200">{workflowError}</p>}
+
+              {workflowResult && (
+                <div className="mt-5 space-y-4 rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
+                  <div className="flex flex-col gap-2 md:flex-row md:items-center md:justify-between">
+                    <div>
+                      <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Workflow status</p>
+                      <h4 className="mt-1 text-lg font-semibold text-white">{workflowResult.status}</h4>
+                    </div>
+                    <span className="rounded-full border border-emerald-500/30 bg-emerald-500/10 px-2.5 py-1 text-xs font-medium text-emerald-300">
+                      ID #{workflowResult.workflow_id}
+                    </span>
+                  </div>
+
+                  <div className="grid gap-3 md:grid-cols-3">
+                    <div className="rounded-xl border border-slate-800 bg-slate-900 p-3">
+                      <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Platform(s)</p>
+                      <p className="mt-2 text-sm text-slate-100">{workflowResult.context?.platforms?.join(', ') || 'Not set'}</p>
+                    </div>
+                    <div className="rounded-xl border border-slate-800 bg-slate-900 p-3">
+                      <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Approval</p>
+                      <p className="mt-2 text-sm text-slate-100">{workflowResult.context?.approval_status || 'PENDING'}</p>
+                    </div>
+                    <div className="rounded-xl border border-slate-800 bg-slate-900 p-3">
+                      <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Agents run</p>
+                      <p className="mt-2 text-sm text-slate-100">{workflowAgents.length}</p>
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    {workflowAgents.map(([name, agent]) => (
+                      <div key={name} className="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-900 px-3 py-2 text-sm">
+                        <span className="text-slate-200">{name}</span>
+                        <span className={`rounded-full px-2 py-1 text-[10px] font-medium uppercase tracking-[0.18em] ${agent.status === 'completed' ? 'bg-emerald-500/10 text-emerald-300' : 'bg-violet-500/10 text-violet-300'}`}>
+                          {agent.status}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {workflowHistory.length > 0 && (
+                <div className="mt-5 rounded-2xl border border-slate-800 bg-slate-950/60 p-4">
+                  <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Recent workflow history</p>
+                  <div className="mt-3 space-y-2">
+                    {workflowHistory.map((workflow) => (
+                      <div key={workflow.workflow_id} className="flex items-center justify-between rounded-xl border border-slate-800 bg-slate-900 px-3 py-2 text-sm">
+                        <span className="text-slate-200">#{workflow.workflow_id}</span>
+                        <span className={`rounded-full px-2 py-1 text-[10px] font-medium uppercase tracking-[0.18em] ${workflow.status === 'completed' ? 'bg-emerald-500/10 text-emerald-300' : 'bg-violet-500/10 text-violet-300'}`}>
+                          {workflow.status}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </section>
 
             <section className="grid gap-6 xl:grid-cols-[0.95fr_1.05fr]">
