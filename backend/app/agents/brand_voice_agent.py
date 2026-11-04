@@ -26,6 +26,10 @@ class BrandVoiceAgent(BaseAgent):
             "approved_markers": ["use direct language", "focus on transformation", "avoid hype language"],
         }
 
+        model_voice_profile = payload.get("voice_profile")
+        if isinstance(model_voice_profile, dict) and model_voice_profile:
+            voice_profile = model_voice_profile
+
         self.status = "completed"
         return {
             "agent": self.name,

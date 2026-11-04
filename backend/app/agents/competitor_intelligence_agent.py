@@ -42,6 +42,10 @@ class CompetitorIntelligenceAgent(BaseAgent):
             },
         ]
 
+        model_observations = payload.get("observations")
+        if isinstance(model_observations, list) and model_observations:
+            observations = model_observations
+
         self.status = "completed"
         return {
             "agent": self.name,

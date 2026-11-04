@@ -25,6 +25,10 @@ class HookGenerationAgent(BaseAgent):
             "The fastest way to grow a creator brand is not louder content. It is clearer positioning and sharper story arcs.",
         ]
 
+        model_hooks = payload.get("hook_alternatives")
+        if isinstance(model_hooks, list) and model_hooks:
+            hooks = model_hooks
+
         self.status = "completed"
         return {
             "agent": self.name,

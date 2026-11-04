@@ -21,7 +21,7 @@ class TrendResearchAgent(BaseAgent):
         payload = self._parse_model_response(raw)
 
         fallback_source = "https://example.com/public-rss-source"
-        suggestions = [
+        fallback_suggestions = [
             {
                 "title": f"{niche} content series that explains mistakes and fixes",
                 "score": 96,
@@ -44,6 +44,10 @@ class TrendResearchAgent(BaseAgent):
                 "published_at": self._now(),
             },
         ]
+
+        suggestions = payload.get("ranked_topic_suggestions")
+        if not isinstance(suggestions, list) or not suggestions:
+            suggestions = fallback_suggestions
 
         self.status = "completed"
         return {
