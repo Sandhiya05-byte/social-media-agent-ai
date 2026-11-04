@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime
 from typing import Any
 
@@ -17,6 +19,75 @@ class WorkflowEngine:
     @staticmethod
     def _status_key(value: str | None) -> str:
         return str(value or "").upper()
+
+    @staticmethod
+    def _content_fingerprint(context: WorkflowContext) -> str:
+        payload = {
+            "campaign_topic": context.campaign_topic,
+            "target_audience": context.target_audience,
+            "platforms": context.platforms,
+            "campaign_objective": context.campaign_objective,
+            "content_type": context.content_type,
+            "brand_voice": context.brand_voice,
+            "research_findings": context.research_findings,
+            "competitor_findings": context.competitor_findings,
+            "hooks": context.hooks,
+            "creative_output": context.creative_output,
+            "video_output": context.video_output,
+            "validation_result": context.validation_result,
+        }
+        return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
+
+    def _enforce_approval_gate(self, workflow_id: int, context: WorkflowContext, *, action: str) -> None:
+        workflow = self.execution_manager.get_workflow(workflow_id)
+        if workflow is None:
+            raise RuntimeError(f"Workflow {workflow_id} was not found; human approval cannot be bypassed.")
+
+        approval_status = self._status_key(workflow.approval_status)
+        if approval_status != "APPROVED":
+            raise RuntimeError(f"Human approval is required before {action}.")
+
+        persisted_hash = workflow.approval_content_hash or ""
+        if not persisted_hash:
+            raise RuntimeError("Workflow approval is missing a persisted content fingerprint.")
+
+        current_hash = self._content_fingerprint(context)
+        if persisted_hash != current_hash:
+            raise RuntimeError("Content was changed after approval; a fresh human approval is required.")
+
+        restored_context_hash = context.approval_content_hash or ""
+        if not restored_context_hash or restored_context_hash != persisted_hash:
+            raise RuntimeError("Workflow approval does not match the current content version.")
+
+    def _block_before_scheduling(self, workflow_id: int, context: WorkflowContext, *, agent_name: str) -> bool:
+        if agent_name != "Publishing and Scheduling Agent":
+            return False
+
+        workflow = self.execution_manager.get_workflow(workflow_id)
+        if workflow is None:
+            raise RuntimeError(f"Workflow {workflow_id} was not found; human approval cannot be bypassed.")
+
+        db_approval_status = self._status_key(workflow.approval_status)
+        if db_approval_status in {"", "PENDING", "WAITING_FOR_APPROVAL", "REQUESTED_CHANGES"}:
+            context.approval_status = "PENDING"
+            context.error_message = "Human approval is required before scheduling."
+            self.execution_manager.save_workflow_checkpoint(
+                workflow_id,
+                context,
+                agent_name="WAITING_FOR_APPROVAL",
+                status="WAITING_FOR_APPROVAL",
+                execution_summary={"failed_agent": agent_name, "status": "waiting_for_approval", "requires_human_approval": True},
+            )
+            self.execution_manager.update_workflow(
+                workflow_id,
+                "WAITING_FOR_APPROVAL",
+                error_message=context.error_message,
+                execution_summary={"failed_agent": agent_name, "status": "waiting_for_approval", "requires_human_approval": True},
+            )
+            return True
+
+        self._enforce_approval_gate(workflow_id, context, action="scheduling")
+        return False
 
     def _build_agent_inputs(self, agent_name: str, context: WorkflowContext) -> dict[str, Any]:
         if agent_name == "Trend Research Agent":
@@ -69,7 +140,11 @@ class WorkflowEngine:
             platforms=list(workflow.platforms or []),
             campaign_objective=workflow.campaign_objective,
             content_type=workflow.content_type,
-            approval_status=workflow.status if workflow.status in {"APPROVED", "REJECTED", "SCHEDULED", "COMPLETED"} else "PENDING",
+            approval_status=workflow.approval_status or (workflow.status if workflow.status in {"APPROVED", "REJECTED", "SCHEDULED", "COMPLETED", "WAITING_FOR_APPROVAL"} else "PENDING"),
+            approval_content_hash=workflow.approval_content_hash,
+            approval_notes=workflow.approval_notes,
+            approved_by=workflow.approved_by,
+            content_version=workflow.content_version,
         )
 
     def run(self, context: WorkflowContext) -> WorkflowContext:
@@ -80,6 +155,9 @@ class WorkflowEngine:
         context.agent_records = {}
 
         for agent_name in self.registry.execution_order():
+            if self._block_before_scheduling(workflow.id, context, agent_name=agent_name):
+                return context
+
             started_at = datetime.utcnow()
             input_data = self._build_agent_inputs(agent_name, context)
             execution_record = self.execution_manager.add_agent_execution(
@@ -172,19 +250,25 @@ class WorkflowEngine:
             )
 
         context.approval_status = "PENDING"
+        context.approval_content_hash = self._content_fingerprint(context)
+        context.content_version = int((context.content_version or 1))
         final_summary = {
             "agent_count": len(context.agent_records),
             "campaign_topic": context.campaign_topic,
             "platforms": context.platforms,
-            "status": "completed",
+            "status": "waiting_for_approval",
         }
+
+        context.approval_status = "PENDING"
+        context.approval_content_hash = self._content_fingerprint(context)
+        context.content_version = int(context.content_version or 1)
 
         try:
             self.execution_manager.save_workflow_checkpoint(
                 workflow.id,
                 context,
                 agent_name="COMPLETED",
-                status="COMPLETED",
+                status="WAITING_FOR_APPROVAL",
                 execution_summary=final_summary,
             )
         except Exception as exc:
@@ -198,6 +282,12 @@ class WorkflowEngine:
             )
             raise
 
+        self.execution_manager.update_workflow(
+            workflow.id,
+            "WAITING_FOR_APPROVAL",
+            error_message=None,
+            execution_summary=final_summary,
+        )
         return context
 
     def resume_workflow(self, workflow_id: int, retry_limit: int | None = None) -> WorkflowContext:
@@ -211,10 +301,18 @@ class WorkflowEngine:
                 raise RuntimeError("Workflow is already RUNNING and cannot be retried.")
             if workflow_status in {"COMPLETED", "CANCELLED", "REJECTED", "SCHEDULED"}:
                 raise RuntimeError(f"Workflow status '{workflow.status}' is not eligible for retry.")
-            if workflow_status not in {"FAILED", "CREATED"}:
+            if workflow_status not in {"FAILED", "CREATED", "WAITING_FOR_APPROVAL", "APPROVED"}:
                 raise RuntimeError(f"Workflow status '{workflow.status}' is not eligible for retry.")
 
             context = self._restore_context_for_workflow(workflow_id)
+            if workflow_status in {"WAITING_FOR_APPROVAL", "APPROVED"}:
+                try:
+                    self._enforce_approval_gate(workflow_id, context, action="resume")
+                except RuntimeError:
+                    if workflow_status == "WAITING_FOR_APPROVAL":
+                        raise RuntimeError("Workflow is waiting for human approval before it can resume.")
+                    raise
+
             self.registry.register_default_agents()
             execution_rows = self.execution_manager.list_agent_executions(workflow_id, session=session)
             execution_by_name = {row.agent_name: row for row in execution_rows}

@@ -27,6 +27,12 @@ class Workflow(Base):
     checkpoint_data: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     last_successful_agent: Mapped[str | None] = mapped_column(String(160), nullable=True)
     last_checkpoint_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    approval_status: Mapped[str] = mapped_column(String(40), default="PENDING", nullable=False)
+    approval_notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    approved_by: Mapped[str | None] = mapped_column(String(160), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    approval_content_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    content_version: Mapped[int] = mapped_column(Integer, default=1, nullable=False)
 
     executions: Mapped[list["AgentExecution"]] = relationship(back_populates="workflow")
 

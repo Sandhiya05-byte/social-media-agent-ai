@@ -21,6 +21,10 @@ class WorkflowContext:
     video_output: dict[str, Any] = field(default_factory=dict)
     validation_result: dict[str, Any] = field(default_factory=dict)
     approval_status: str = "PENDING"
+    approval_content_hash: str | None = None
+    approval_notes: str | None = None
+    approved_by: str | None = None
+    content_version: int = 1
     scheduling: dict[str, Any] = field(default_factory=dict)
     agent_records: dict[str, dict[str, Any]] = field(default_factory=dict)
     error_message: str | None = None
@@ -46,6 +50,10 @@ class WorkflowContext:
             video_output=dict(data.get("video_output") or {}),
             validation_result=dict(data.get("validation_result") or {}),
             approval_status=data.get("approval_status", "PENDING"),
+            approval_content_hash=data.get("approval_content_hash"),
+            approval_notes=data.get("approval_notes"),
+            approved_by=data.get("approved_by"),
+            content_version=int(data.get("content_version") or 1),
             scheduling=dict(data.get("scheduling") or {}),
             agent_records=dict(data.get("agent_records") or {}),
             error_message=data.get("error_message"),
@@ -69,6 +77,10 @@ class WorkflowContext:
             "video_output": self.video_output,
             "validation_result": self.validation_result,
             "approval_status": self.approval_status,
+            "approval_content_hash": self.approval_content_hash,
+            "approval_notes": self.approval_notes,
+            "approved_by": self.approved_by,
+            "content_version": self.content_version,
             "scheduling": self.scheduling,
             "agent_records": self.agent_records,
             "error_message": self.error_message,

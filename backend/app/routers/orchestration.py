@@ -22,6 +22,11 @@ class WorkflowRequest(BaseModel):
     brand_voice: dict = {}
 
 
+class WorkflowApprovalRequest(BaseModel):
+    approved_by: str | None = None
+    notes: str | None = None
+
+
 @router.post("/workflows")
 def create_and_run_workflow(payload: WorkflowRequest):
     orchestrator = CentralAgentOrchestrator()
@@ -41,7 +46,98 @@ def create_and_run_workflow(payload: WorkflowRequest):
     except Exception as exc:  # pragma: no cover - network failure wrapper
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
-    return {"workflow_id": context.workflow_id, "status": "completed", "context": context.to_dict()}
+    return {"workflow_id": context.workflow_id, "status": context.approval_status if context.approval_status else "WAITING_FOR_APPROVAL", "context": context.to_dict()}
+
+
+@router.post("/workflows/{workflow_id}/approve")
+def approve_workflow(workflow_id: int, payload: WorkflowApprovalRequest):
+    from app.orchestration.execution_manager import ExecutionManager
+
+    manager = ExecutionManager()
+    workflow = manager.get_workflow(workflow_id)
+    if workflow is None:
+        raise HTTPException(status_code=404, detail="Workflow not found.")
+    if workflow.status not in {"WAITING_FOR_APPROVAL", "PENDING", "APPROVED"}:
+        raise HTTPException(status_code=409, detail="Workflow is not awaiting approval.")
+
+    context = manager.get_workflow_context(workflow_id)
+    if context is None:
+        raise HTTPException(status_code=404, detail="Workflow checkpoint not found.")
+
+    approved_by = payload.approved_by or "human-reviewer"
+    notes = payload.notes
+    current_content_hash = WorkflowEngine()._content_fingerprint(context)
+    context.approval_status = "APPROVED"
+    context.approved_by = approved_by
+    context.approval_notes = notes
+    context.approval_content_hash = current_content_hash
+    manager.record_approval_decision(
+        workflow_id,
+        "APPROVED",
+        approved_by=approved_by,
+        notes=notes,
+        content_hash=current_content_hash,
+    )
+    manager.save_workflow_checkpoint(workflow_id, context, agent_name="COMPLETED", status="APPROVED", execution_summary={"status": "approved"})
+    return {"workflow_id": workflow_id, "status": "APPROVED", "context": context.to_dict()}
+
+
+@router.post("/workflows/{workflow_id}/reject")
+def reject_workflow(workflow_id: int, payload: WorkflowApprovalRequest):
+    from app.orchestration.execution_manager import ExecutionManager
+
+    manager = ExecutionManager()
+    workflow = manager.get_workflow(workflow_id)
+    if workflow is None:
+        raise HTTPException(status_code=404, detail="Workflow not found.")
+    if workflow.status not in {"WAITING_FOR_APPROVAL", "PENDING", "APPROVED"}:
+        raise HTTPException(status_code=409, detail="Workflow is not awaiting approval.")
+
+    context = manager.get_workflow_context(workflow_id)
+    if context is None:
+        raise HTTPException(status_code=404, detail="Workflow checkpoint not found.")
+
+    context.approval_status = "REJECTED"
+    context.approval_notes = payload.notes or "Rejected by human reviewer."
+    context.approved_by = payload.approved_by or "human-reviewer"
+    manager.record_approval_decision(
+        workflow_id,
+        "REJECTED",
+        approved_by=context.approved_by,
+        notes=context.approval_notes,
+        content_hash=context.approval_content_hash,
+    )
+    manager.save_workflow_checkpoint(workflow_id, context, agent_name="REJECTED", status="REJECTED", execution_summary={"status": "rejected"})
+    return {"workflow_id": workflow_id, "status": "REJECTED", "context": context.to_dict()}
+
+
+@router.post("/workflows/{workflow_id}/request-changes")
+def request_changes_workflow(workflow_id: int, payload: WorkflowApprovalRequest):
+    from app.orchestration.execution_manager import ExecutionManager
+
+    manager = ExecutionManager()
+    workflow = manager.get_workflow(workflow_id)
+    if workflow is None:
+        raise HTTPException(status_code=404, detail="Workflow not found.")
+    if workflow.status not in {"WAITING_FOR_APPROVAL", "PENDING", "APPROVED"}:
+        raise HTTPException(status_code=409, detail="Workflow is not awaiting approval.")
+
+    context = manager.get_workflow_context(workflow_id)
+    if context is None:
+        raise HTTPException(status_code=404, detail="Workflow checkpoint not found.")
+
+    context.approval_status = "REQUESTED_CHANGES"
+    context.approval_notes = payload.notes or "Changes requested by reviewer."
+    context.approved_by = payload.approved_by or "human-reviewer"
+    manager.record_approval_decision(
+        workflow_id,
+        "REQUESTED_CHANGES",
+        approved_by=context.approved_by,
+        notes=context.approval_notes,
+        content_hash=context.approval_content_hash,
+    )
+    manager.save_workflow_checkpoint(workflow_id, context, agent_name="REQUESTED_CHANGES", status="WAITING_FOR_APPROVAL", execution_summary={"status": "requested_changes"})
+    return {"workflow_id": workflow_id, "status": "WAITING_FOR_APPROVAL", "context": context.to_dict()}
 
 
 @router.get("/workflows/{workflow_id}")

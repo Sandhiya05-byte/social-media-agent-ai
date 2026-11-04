@@ -26,6 +26,12 @@ def _ensure_workflow_checkpoint_columns() -> None:
             "checkpoint_data": "ALTER TABLE workflows ADD COLUMN checkpoint_data JSON DEFAULT '{}'",
             "last_successful_agent": "ALTER TABLE workflows ADD COLUMN last_successful_agent VARCHAR(160)",
             "last_checkpoint_at": "ALTER TABLE workflows ADD COLUMN last_checkpoint_at DATETIME",
+            "approval_status": "ALTER TABLE workflows ADD COLUMN approval_status VARCHAR(40) DEFAULT 'PENDING'",
+            "approval_notes": "ALTER TABLE workflows ADD COLUMN approval_notes TEXT",
+            "approved_by": "ALTER TABLE workflows ADD COLUMN approved_by VARCHAR(160)",
+            "approved_at": "ALTER TABLE workflows ADD COLUMN approved_at DATETIME",
+            "approval_content_hash": "ALTER TABLE workflows ADD COLUMN approval_content_hash VARCHAR(128)",
+            "content_version": "ALTER TABLE workflows ADD COLUMN content_version INTEGER DEFAULT 1",
         }
 
         for column_name, sql in required_columns.items():

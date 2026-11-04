@@ -49,6 +49,7 @@ class ExecutionManager:
                 campaign_objective=context.campaign_objective,
                 content_type=context.content_type,
                 status="CREATED",
+                approval_status=context.approval_status or "PENDING",
                 execution_summary={},
                 checkpoint_data={},
             )
@@ -79,10 +80,61 @@ class ExecutionManager:
             if checkpoint_data is not None:
                 workflow.checkpoint_data = self._json_safe(checkpoint_data)
             workflow.updated_at = datetime.utcnow()
-            if status in {"COMPLETED", "FAILED", "CANCELLED"}:
+            if status in {"COMPLETED", "FAILED", "CANCELLED", "REJECTED"}:
                 workflow.completed_at = datetime.utcnow()
             if owns_session:
                 session.commit()
+        finally:
+            if owns_session:
+                session.close()
+
+    def record_approval_decision(
+        self,
+        workflow_id: int,
+        approval_status: str,
+        *,
+        approved_by: str | None = None,
+        notes: str | None = None,
+        content_hash: str | None = None,
+        session=None,
+    ) -> Workflow | None:
+        owns_session = session is None
+        session = session or self.session_factory()
+        try:
+            workflow = session.get(Workflow, workflow_id)
+            if workflow is None:
+                return None
+
+            normalized_status = approval_status.upper()
+            workflow.approval_status = normalized_status
+            workflow.approval_notes = notes
+            workflow.approved_by = approved_by or "human-reviewer"
+            workflow.updated_at = datetime.utcnow()
+
+            if normalized_status == "APPROVED":
+                if not content_hash:
+                    raise ValueError("Approval requires a persisted content fingerprint.")
+                workflow.approval_content_hash = content_hash
+                workflow.approved_at = datetime.utcnow()
+                workflow.status = "APPROVED"
+            elif normalized_status == "REJECTED":
+                workflow.approval_content_hash = None
+                workflow.approved_at = None
+                workflow.status = "REJECTED"
+                workflow.completed_at = datetime.utcnow()
+            elif normalized_status in {"REQUESTED_CHANGES", "PENDING"}:
+                workflow.approval_content_hash = None
+                workflow.approved_at = None
+                workflow.status = "WAITING_FOR_APPROVAL"
+            else:
+                workflow.approval_content_hash = None
+                workflow.approved_at = None
+                workflow.status = "WAITING_FOR_APPROVAL"
+
+            if owns_session:
+                session.commit()
+            session.refresh(workflow)
+            return workflow
         finally:
             if owns_session:
                 session.close()
@@ -106,14 +158,16 @@ class ExecutionManager:
 
             payload = self._json_safe(context.to_dict())
             workflow.checkpoint_data = payload
-            workflow.last_successful_agent = agent_name or workflow.last_successful_agent
+            if agent_name and agent_name.upper() not in {"WAITING_FOR_APPROVAL", "PENDING", "FAILED", "RUNNING"}:
+                workflow.last_successful_agent = agent_name
             workflow.last_checkpoint_at = datetime.utcnow()
             workflow.updated_at = datetime.utcnow()
+
             if status is not None:
                 workflow.status = status
                 workflow.error_message = error_message
                 workflow.execution_summary = self._json_safe(execution_summary or workflow.execution_summary)
-                if status in {"COMPLETED", "FAILED", "CANCELLED"}:
+                if status in {"COMPLETED", "FAILED", "CANCELLED", "REJECTED"}:
                     workflow.completed_at = datetime.utcnow()
             elif error_message is not None:
                 workflow.error_message = error_message
@@ -135,7 +189,13 @@ class ExecutionManager:
             if workflow is None:
                 return None
             if workflow.checkpoint_data:
-                return WorkflowContext.from_dict(workflow.checkpoint_data)
+                restored = WorkflowContext.from_dict(workflow.checkpoint_data)
+                restored.approval_status = workflow.approval_status or restored.approval_status
+                restored.approval_content_hash = workflow.approval_content_hash or restored.approval_content_hash
+                restored.approval_notes = workflow.approval_notes or restored.approval_notes
+                restored.approved_by = workflow.approved_by or restored.approved_by
+                restored.content_version = workflow.content_version or restored.content_version
+                return restored
             return WorkflowContext(
                 workflow_id=workflow.id,
                 creator_id=workflow.creator_id,
@@ -144,7 +204,11 @@ class ExecutionManager:
                 platforms=list(workflow.platforms or []),
                 campaign_objective=workflow.campaign_objective,
                 content_type=workflow.content_type,
-                approval_status=workflow.status if workflow.status in {"APPROVED", "REJECTED", "SCHEDULED", "COMPLETED"} else "PENDING",
+                approval_status=workflow.approval_status or (workflow.status if workflow.status in {"APPROVED", "REJECTED", "SCHEDULED", "COMPLETED", "WAITING_FOR_APPROVAL"} else "PENDING"),
+                approval_content_hash=workflow.approval_content_hash,
+                approval_notes=workflow.approval_notes,
+                approved_by=workflow.approved_by,
+                content_version=workflow.content_version,
             )
         finally:
             if owns_session:
