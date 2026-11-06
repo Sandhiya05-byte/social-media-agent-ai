@@ -5,8 +5,10 @@ from datetime import datetime
 from typing import Any
 
 from app.database import SessionLocal, init_db
+from app.models.content import ContentItem
 from app.models.workflow import AgentExecution, Workflow
 from app.orchestration.workflow_context import WorkflowContext
+from app.time_utils import utcnow
 
 
 class ExecutionManager:
@@ -79,9 +81,9 @@ class ExecutionManager:
             workflow.execution_summary = execution_summary or workflow.execution_summary
             if checkpoint_data is not None:
                 workflow.checkpoint_data = self._json_safe(checkpoint_data)
-            workflow.updated_at = datetime.utcnow()
+            workflow.updated_at = utcnow()
             if status in {"COMPLETED", "FAILED", "CANCELLED", "REJECTED"}:
-                workflow.completed_at = datetime.utcnow()
+                workflow.completed_at = utcnow()
             if owns_session:
                 session.commit()
         finally:
@@ -109,19 +111,19 @@ class ExecutionManager:
             workflow.approval_status = normalized_status
             workflow.approval_notes = notes
             workflow.approved_by = approved_by or "human-reviewer"
-            workflow.updated_at = datetime.utcnow()
+            workflow.updated_at = utcnow()
 
             if normalized_status == "APPROVED":
                 if not content_hash:
                     raise ValueError("Approval requires a persisted content fingerprint.")
                 workflow.approval_content_hash = content_hash
-                workflow.approved_at = datetime.utcnow()
+                workflow.approved_at = utcnow()
                 workflow.status = "APPROVED"
             elif normalized_status == "REJECTED":
                 workflow.approval_content_hash = None
                 workflow.approved_at = None
                 workflow.status = "REJECTED"
-                workflow.completed_at = datetime.utcnow()
+                workflow.completed_at = utcnow()
             elif normalized_status in {"REQUESTED_CHANGES", "PENDING"}:
                 workflow.approval_content_hash = None
                 workflow.approved_at = None
@@ -160,23 +162,103 @@ class ExecutionManager:
             workflow.checkpoint_data = payload
             if agent_name and agent_name.upper() not in {"WAITING_FOR_APPROVAL", "PENDING", "FAILED", "RUNNING"}:
                 workflow.last_successful_agent = agent_name
-            workflow.last_checkpoint_at = datetime.utcnow()
-            workflow.updated_at = datetime.utcnow()
+            workflow.last_checkpoint_at = utcnow()
+            workflow.updated_at = utcnow()
 
             if status is not None:
                 workflow.status = status
                 workflow.error_message = error_message
                 workflow.execution_summary = self._json_safe(execution_summary or workflow.execution_summary)
                 if status in {"COMPLETED", "FAILED", "CANCELLED", "REJECTED"}:
-                    workflow.completed_at = datetime.utcnow()
+                    workflow.completed_at = utcnow()
             elif error_message is not None:
                 workflow.error_message = error_message
             if execution_summary is not None and status is None:
                 workflow.execution_summary = self._json_safe(execution_summary)
             if owns_session:
                 session.commit()
+            else:
+                session.flush()
             session.refresh(workflow)
             return workflow
+        finally:
+            if owns_session:
+                session.close()
+
+    # ------------------------------------------------------------------
+    # Workflow -> ContentItem auto-bridge (P0)
+    # ------------------------------------------------------------------
+    def create_content_item_from_workflow(
+        self,
+        workflow_id: int,
+        session=None,
+    ) -> "ContentItem | None":
+        """Create the ContentItem for a completed workflow, idempotently.
+
+        Called automatically when a workflow reaches WAITING_FOR_APPROVAL.
+        Repeated invocations return the existing item instead of creating a
+        duplicate. Workflow and ContentItem stay queryably linked through
+        ContentItem.workflow_id.
+        """
+        owns_session = session is None
+        session = session or self.session_factory()
+        try:
+            workflow = session.get(Workflow, workflow_id)
+            if workflow is None:
+                return None
+
+            existing = (
+                session.query(ContentItem)
+                .filter(ContentItem.workflow_id == workflow_id)
+                .first()
+            )
+            if existing is not None:
+                return existing
+
+            checkpoint = workflow.checkpoint_data or {}
+            creative = checkpoint.get("creative_output") or {}
+            video = checkpoint.get("video_output") or {}
+            validation = checkpoint.get("validation_result") or {}
+            research = checkpoint.get("research_findings") or {}
+
+            title = str(creative.get("title") or workflow.campaign_topic or "").strip()
+            body = str(creative.get("content") or "").strip()
+            if not title or not body:
+                return None  # nothing reviewable yet; not an error
+
+            media_path = video.get("video_url") or video.get("video_path")
+            platforms = list(workflow.platforms or [])
+            platform = platforms[0] if platforms else "Instagram"
+
+            import json as _json
+
+            content_item = ContentItem(
+                workflow_id=workflow_id,
+                creator_id=workflow.creator_id,
+                title=title[:180],
+                platform=platform,
+                content=body,
+                script=creative.get("script"),
+                captions=_json.dumps(creative.get("captions", [])),
+                media_path=media_path,
+                generation_source=creative.get("generation_source") or "unknown",
+                source_references=workflow.checkpoint_data.get("research_findings", {}).get("source_references", []),
+                validation_errors=_json.dumps(validation.get("errors", [])),
+                validation_warnings=_json.dumps(validation.get("warnings", [])),
+                status="Awaiting Approval" if not validation.get("errors") else "Validation Failed",
+            )
+            session.add(content_item)
+            session.flush()
+            if owns_session:
+                session.commit()
+            else:
+                session.commit()
+            session.refresh(content_item)
+            return content_item
+        except Exception:
+            if owns_session:
+                session.rollback()
+            raise
         finally:
             if owns_session:
                 session.close()

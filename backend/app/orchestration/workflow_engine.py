@@ -9,6 +9,7 @@ from app.config import DEFAULT_WORKFLOW_RETRY_LIMIT
 from app.orchestration.agent_registry import AgentRegistry
 from app.orchestration.execution_manager import ExecutionManager
 from app.orchestration.workflow_context import WorkflowContext
+from app.time_utils import utcnow
 
 
 class WorkflowEngine:
@@ -38,8 +39,15 @@ class WorkflowEngine:
         }
         return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
-    def _enforce_approval_gate(self, workflow_id: int, context: WorkflowContext, *, action: str) -> None:
-        workflow = self.execution_manager.get_workflow(workflow_id)
+    def _enforce_approval_gate(
+        self,
+        workflow_id: int,
+        context: WorkflowContext,
+        *,
+        action: str,
+        session=None,
+    ) -> None:
+        workflow = self.execution_manager.get_workflow(workflow_id, session=session)
         if workflow is None:
             raise RuntimeError(f"Workflow {workflow_id} was not found; human approval cannot be bypassed.")
 
@@ -59,11 +67,18 @@ class WorkflowEngine:
         if not restored_context_hash or restored_context_hash != persisted_hash:
             raise RuntimeError("Workflow approval does not match the current content version.")
 
-    def _block_before_scheduling(self, workflow_id: int, context: WorkflowContext, *, agent_name: str) -> bool:
+    def _block_before_scheduling(
+        self,
+        workflow_id: int,
+        context: WorkflowContext,
+        *,
+        agent_name: str,
+        session=None,
+    ) -> bool:
         if agent_name != "Publishing and Scheduling Agent":
             return False
 
-        workflow = self.execution_manager.get_workflow(workflow_id)
+        workflow = self.execution_manager.get_workflow(workflow_id, session=session)
         if workflow is None:
             raise RuntimeError(f"Workflow {workflow_id} was not found; human approval cannot be bypassed.")
 
@@ -71,22 +86,42 @@ class WorkflowEngine:
         if db_approval_status in {"", "PENDING", "WAITING_FOR_APPROVAL", "REQUESTED_CHANGES"}:
             context.approval_status = "PENDING"
             context.error_message = "Human approval is required before scheduling."
+            summary = {
+                "failed_agent": agent_name,
+                "status": "waiting_for_approval",
+                "requires_human_approval": True,
+            }
             self.execution_manager.save_workflow_checkpoint(
                 workflow_id,
                 context,
                 agent_name="WAITING_FOR_APPROVAL",
                 status="WAITING_FOR_APPROVAL",
-                execution_summary={"failed_agent": agent_name, "status": "waiting_for_approval", "requires_human_approval": True},
+                execution_summary=summary,
+                session=session,
             )
             self.execution_manager.update_workflow(
                 workflow_id,
                 "WAITING_FOR_APPROVAL",
                 error_message=context.error_message,
-                execution_summary={"failed_agent": agent_name, "status": "waiting_for_approval", "requires_human_approval": True},
+                execution_summary=summary,
+                session=session,
             )
+            # P0 auto-bridge: agents 1-6 completed, so the generated content
+            # must reach the approval queue even though agent 7 is gated.
+            try:
+                self.execution_manager.create_content_item_from_workflow(workflow_id, session=session)
+            except Exception as exc:  # noqa: BLE001 - bridge failure must not fail the run
+                summary = {**summary, "content_bridge_failed": str(exc)}
+                self.execution_manager.update_workflow(
+                    workflow_id,
+                    "WAITING_FOR_APPROVAL",
+                    error_message=f"Content bridge failed: {exc}",
+                    execution_summary=summary,
+                    session=session,
+                )
             return True
 
-        self._enforce_approval_gate(workflow_id, context, action="scheduling")
+        self._enforce_approval_gate(workflow_id, context, action="scheduling", session=session)
         return False
 
     def _build_agent_inputs(self, agent_name: str, context: WorkflowContext) -> dict[str, Any]:
@@ -97,32 +132,152 @@ class WorkflowEngine:
             }
         if agent_name == "Competitor Intelligence Agent":
             competitor_urls = context.competitor_findings.get("competitor_urls", []) if isinstance(context.competitor_findings, dict) else []
-            return {"niche": context.campaign_topic, "competitor_urls": competitor_urls}
+            return {
+                "niche": context.campaign_topic,
+                "competitor_urls": competitor_urls,
+                "research_results": context.research_findings,
+            }
         if agent_name == "Brand Voice Agent":
             samples = context.brand_voice.get("samples", []) if isinstance(context.brand_voice, dict) else []
-            return {"niche": context.campaign_topic, "creator_samples": samples}
+            return {
+                "niche": context.campaign_topic,
+                "creator_samples": samples,
+                "target_audience": context.target_audience,
+                "campaign_objective": context.campaign_objective,
+                "research_results": context.research_findings,
+            }
         if agent_name == "Hook Generation Agent":
             voice_profile = context.brand_voice.get("voice_profile", {}) if isinstance(context.brand_voice, dict) else {}
-            return {"niche": context.campaign_topic, "creator_style": voice_profile}
+            return {
+                "niche": context.campaign_topic,
+                "creator_style": voice_profile,
+                "target_audience": context.target_audience,
+                "research_results": context.research_findings,
+                "competitor_findings": context.competitor_findings,
+            }
         if agent_name == "AI Clone and Creative Agent":
             return {
-                "title": f"{context.campaign_topic} creative direction",
+                "campaign_topic": context.campaign_topic,
+                "target_audience": context.target_audience,
+                "campaign_objective": context.campaign_objective,
+                "content_type": context.content_type,
+                "brand_voice": context.brand_voice,
+                "research_findings": context.research_findings,
+                "competitor_findings": context.competitor_findings,
+                "hooks": context.hooks,
+                "recommended_hook": context.recommended_hook,
                 "platform": context.platforms[0] if context.platforms else "Instagram",
-                "content": context.campaign_objective,
             }
         if agent_name == "Video Production Agent":
+            creative = context.creative_output
             return {
-                "title": f"{context.campaign_topic} short-form video",
-                "script": context.hooks[0] if context.hooks else context.campaign_topic,
+                "title": creative.get("title") or f"{context.campaign_topic} short-form video",
+                "script": creative.get("script") or (context.hooks[0] if context.hooks else context.campaign_topic),
                 "platform": context.platforms[0] if context.platforms else "Instagram",
+                "captions": creative.get("captions", []),
+                "content": creative.get("content", ""),
             }
         if agent_name == "Publishing and Scheduling Agent":
             return {
                 "campaign_topic": context.campaign_topic,
                 "platforms": context.platforms,
                 "status": context.approval_status,
+                "creative_output": {
+                    "title": context.creative_output.get("title", ""),
+                    "content": context.creative_output.get("content", ""),
+                    "script": context.creative_output.get("script"),
+                    "captions": context.creative_output.get("captions", []),
+                },
             }
         return {}
+
+    @staticmethod
+    def _apply_agent_result(agent_name: str, result: dict[str, Any], context: WorkflowContext) -> None:
+        context.agent_records[agent_name] = result
+        if agent_name == "Trend Research Agent":
+            context.research_findings = {
+                "topic_summary": result.get("topic_summary"),
+                "ranked_topic_suggestions": result.get("trending_subtopics", []),
+                "rss_sources": result.get("rss_sources", []),
+                "source_references": result.get("source_references", []),
+                "keywords": result.get("keywords", []),
+                "observations": result.get("observations", []),
+                "provider_statuses": result.get("provider_statuses", {}),
+                "provider_limitations": result.get("provider_limitations", []),
+                "research_status": result.get("research_status"),
+            }
+        elif agent_name == "Competitor Intelligence Agent":
+            context.competitor_findings = {
+                "observations": result.get("observations", []),
+                "competitor_urls": result.get("competitor_urls", []),
+                "user_supplied_urls": result.get("user_supplied_urls", []),
+                "source_references": result.get("source_references", []),
+            }
+        elif agent_name == "Brand Voice Agent":
+            context.brand_voice = {
+                "samples": result.get("creator_samples", []),
+                "voice_profile": result.get("voice_profile", {}),
+                "summary": result.get("summary"),
+            }
+        elif agent_name == "Hook Generation Agent":
+            context.hooks = result.get("hook_alternatives", [])
+            context.recommended_hook = result.get("recommended_hook")
+        elif agent_name == "AI Clone and Creative Agent":
+            context.creative_output = {
+                "title": result.get("title"),
+                "content": result.get("content"),
+                "script": result.get("script"),
+                "captions": result.get("captions", []),
+                "hashtags": result.get("hashtags", []),
+                "generation_source": result.get("generation_source"),
+                "summary": result.get("summary"),
+                "generated_file": result.get("generated_file"),
+                "preview_url": result.get("preview_url"),
+                "platform": result.get("platform"),
+            }
+        elif agent_name == "Video Production Agent":
+            context.video_output = {
+                "platform": result.get("platform"),
+                "video_path": result.get("video_path"),
+                "video_format": result.get("video_format"),
+                "render_engine": result.get("render_engine"),
+                "thumbnail_path": result.get("thumbnail_path"),
+                "subtitle_path": result.get("subtitle_path"),
+                "captions": result.get("captions", []),
+                # Full media metadata so the frontend can render the actual
+                # MP4 with sound instead of a stale GIF preview.
+                "video_url": result.get("video_url"),
+                "thumbnail_url": result.get("thumbnail_url"),
+                "subtitle_url": result.get("subtitle_url"),
+                "narration_audio_path": result.get("narration_audio_path"),
+                "duration_seconds": result.get("duration_seconds"),
+                "video_width": result.get("video_width"),
+                "video_height": result.get("video_height"),
+                "audio_enabled": result.get("audio_enabled"),
+                "scene_count": result.get("scene_count"),
+                "script_sufficient": result.get("script_sufficient"),
+                "render_error": result.get("render_error"),
+                "tts_error": result.get("tts_error"),
+                "limits": result.get("limits"),
+            }
+            try:
+                from app.services.content_validation import validate_content_payload
+
+                validation = validate_content_payload(
+                    {
+                        "title": context.creative_output.get("title") or context.campaign_topic,
+                        "platform": context.platforms[0] if context.platforms else "Instagram",
+                        "content": context.creative_output.get("content") or "",
+                        "script": context.creative_output.get("script"),
+                        "captions": context.creative_output.get("captions", []),
+                        "media_path": result.get("video_path"),
+                    }
+                )
+                context.validation_result = validation.model_dump()
+            except Exception:
+                context.validation_result = {}
+        elif agent_name == "Publishing and Scheduling Agent":
+            context.scheduling = result.get("schedule", {})
 
     def _restore_context_for_workflow(self, workflow_id: int) -> WorkflowContext:
         context = self.execution_manager.get_workflow_context(workflow_id)
@@ -158,7 +313,7 @@ class WorkflowEngine:
             if self._block_before_scheduling(workflow.id, context, agent_name=agent_name):
                 return context
 
-            started_at = datetime.utcnow()
+            started_at = utcnow()
             input_data = self._build_agent_inputs(agent_name, context)
             execution_record = self.execution_manager.add_agent_execution(
                 workflow_id=workflow.id,
@@ -172,7 +327,7 @@ class WorkflowEngine:
                 agent = self.registry.get(agent_name)
                 result = agent.execute(**input_data)
             except Exception as exc:  # pragma: no cover - defensive guard
-                completed_at = datetime.utcnow()
+                completed_at = utcnow()
                 self.execution_manager.update_agent_execution(
                     execution_record.id,
                     status="FAILED",
@@ -190,35 +345,11 @@ class WorkflowEngine:
                 )
                 return context
 
-            completed_at = datetime.utcnow()
+            completed_at = utcnow()
             result_status = str(result.get("status", "completed")).upper()
             duration_ms = int((completed_at - started_at).total_seconds() * 1000)
 
-            context.agent_records[agent_name] = result
-            if agent_name == "Trend Research Agent":
-                context.research_findings = {"ranked_topic_suggestions": result.get("ranked_topic_suggestions", []), "rss_sources": result.get("source_urls", [])}
-            elif agent_name == "Competitor Intelligence Agent":
-                context.competitor_findings = {"observations": result.get("observations", []), "competitor_urls": result.get("competitor_urls", [])}
-            elif agent_name == "Brand Voice Agent":
-                context.brand_voice = {
-                    "samples": result.get("creator_samples", []),
-                    "voice_profile": result.get("voice_profile", {}),
-                }
-            elif agent_name == "Hook Generation Agent":
-                context.hooks = result.get("hook_alternatives", [])
-            elif agent_name == "AI Clone and Creative Agent":
-                context.creative_output = {
-                    "platform": result.get("platform"),
-                    "generated_file": result.get("generated_file"),
-                    "preview_url": result.get("preview_url"),
-                }
-            elif agent_name == "Video Production Agent":
-                context.video_output = {
-                    "platform": result.get("platform"),
-                    "video_path": result.get("video_path"),
-                    "thumbnail_path": result.get("thumbnail_path"),
-                    "subtitle_path": result.get("subtitle_path"),
-                }
+            self._apply_agent_result(agent_name, result, context)
 
             try:
                 self.execution_manager.save_workflow_checkpoint(workflow.id, context, agent_name=agent_name)
@@ -228,8 +359,8 @@ class WorkflowEngine:
                     execution_record.id,
                     status="FAILED",
                     output_data={"error": checkpoint_error, "result": result},
-                    completed_at=datetime.utcnow(),
-                    execution_duration=int((datetime.utcnow() - started_at).total_seconds() * 1000),
+                    completed_at=utcnow(),
+                    execution_duration=int((utcnow() - started_at).total_seconds() * 1000),
                     error_message=checkpoint_error,
                 )
                 context.error_message = checkpoint_error
@@ -251,17 +382,13 @@ class WorkflowEngine:
 
         context.approval_status = "PENDING"
         context.approval_content_hash = self._content_fingerprint(context)
-        context.content_version = int((context.content_version or 1))
+        context.content_version = int(context.content_version or 1)
         final_summary = {
             "agent_count": len(context.agent_records),
             "campaign_topic": context.campaign_topic,
             "platforms": context.platforms,
             "status": "waiting_for_approval",
         }
-
-        context.approval_status = "PENDING"
-        context.approval_content_hash = self._content_fingerprint(context)
-        context.content_version = int(context.content_version or 1)
 
         try:
             self.execution_manager.save_workflow_checkpoint(
@@ -288,6 +415,18 @@ class WorkflowEngine:
             error_message=None,
             execution_summary=final_summary,
         )
+
+        # P0 auto-bridge: a completed workflow always has its ContentItem.
+        try:
+            self.execution_manager.create_content_item_from_workflow(workflow.id)
+        except Exception as exc:  # noqa: BLE001 - bridge failure must not fail the run
+            context.error_message = f"Content bridge failed: {exc}"
+            self.execution_manager.update_workflow(
+                workflow.id,
+                "WAITING_FOR_APPROVAL",
+                error_message=context.error_message,
+                execution_summary={**final_summary, "content_bridge_failed": str(exc)},
+            )
         return context
 
     def resume_workflow(self, workflow_id: int, retry_limit: int | None = None) -> WorkflowContext:
@@ -353,7 +492,14 @@ class WorkflowEngine:
 
             for index in range(resume_from_index, len(ordered_agents)):
                 agent_name = ordered_agents[index]
-                started_at = datetime.utcnow()
+                if self._block_before_scheduling(
+                    workflow_id,
+                    context,
+                    agent_name=agent_name,
+                    session=session,
+                ):
+                    return context
+                started_at = utcnow()
                 input_data = self._build_agent_inputs(agent_name, context)
                 latest_execution = self.execution_manager.get_agent_execution(workflow_id, agent_name, session=session)
                 retry_count = 0
@@ -390,7 +536,7 @@ class WorkflowEngine:
                     agent = self.registry.get(agent_name)
                     result = agent.execute(**input_data)
                 except Exception as exc:  # pragma: no cover - defensive guard
-                    completed_at = datetime.utcnow()
+                    completed_at = utcnow()
                     self.execution_manager.update_agent_execution(
                         execution_record.id,
                         status="FAILED",
@@ -412,23 +558,11 @@ class WorkflowEngine:
                     )
                     return context
 
-                completed_at = datetime.utcnow()
+                completed_at = utcnow()
                 duration_ms = int((completed_at - started_at).total_seconds() * 1000)
                 result_status = str(result.get("status", "completed")).upper()
 
-                context.agent_records[agent_name] = result
-                if agent_name == "Trend Research Agent":
-                    context.research_findings = {"ranked_topic_suggestions": result.get("ranked_topic_suggestions", []), "rss_sources": result.get("source_urls", [])}
-                elif agent_name == "Competitor Intelligence Agent":
-                    context.competitor_findings = {"observations": result.get("observations", []), "competitor_urls": result.get("competitor_urls", [])}
-                elif agent_name == "Brand Voice Agent":
-                    context.brand_voice = {"samples": result.get("creator_samples", []), "voice_profile": result.get("voice_profile", {})}
-                elif agent_name == "Hook Generation Agent":
-                    context.hooks = result.get("hook_alternatives", [])
-                elif agent_name == "AI Clone and Creative Agent":
-                    context.creative_output = {"platform": result.get("platform"), "generated_file": result.get("generated_file"), "preview_url": result.get("preview_url")}
-                elif agent_name == "Video Production Agent":
-                    context.video_output = {"platform": result.get("platform"), "video_path": result.get("video_path"), "thumbnail_path": result.get("thumbnail_path"), "subtitle_path": result.get("subtitle_path")}
+                self._apply_agent_result(agent_name, result, context)
 
                 try:
                     self.execution_manager.save_workflow_checkpoint(workflow_id, context, agent_name=agent_name, session=session)
@@ -440,8 +574,8 @@ class WorkflowEngine:
                         input_data=input_data,
                         output_data={"error": checkpoint_error, "result": result},
                         started_at=started_at,
-                        completed_at=datetime.utcnow(),
-                        execution_duration=int((datetime.utcnow() - started_at).total_seconds() * 1000),
+                        completed_at=utcnow(),
+                        execution_duration=int((utcnow() - started_at).total_seconds() * 1000),
                         retry_count=retry_count if retry_count else int(getattr(execution_record, "retry_count", 0) or 0),
                         error_message=checkpoint_error,
                         session=session,

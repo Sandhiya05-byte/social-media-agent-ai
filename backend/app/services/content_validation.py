@@ -1,12 +1,23 @@
+from __future__ import annotations
+
 import re
 from typing import Any
 
 from app.schemas.content import ContentValidationRequest, ValidationResult
 
 PLATFORM_REQUIREMENTS = {
-    "Instagram": ["caption or post copy is required", "short-form media should be concise and audience-first"],
-    "YouTube": ["script is required for video narration", "title should clearly define the topic"],
-    "LinkedIn": ["professional, insight-led language is recommended", "title should explain the value or learning"],
+    "Instagram": [
+        ("caption or post copy is required", lambda p: bool(p.captions or (p.content or "").strip())),
+        ("short-form media should be concise and audience-first", lambda p: len((p.content or "").strip()) <= 2200),
+    ],
+    "YouTube": [
+        ("script is required for video narration", lambda p: bool((p.script or "").strip())),
+        ("title should clearly define the topic", lambda p: len((p.title or "").strip()) >= 5),
+    ],
+    "LinkedIn": [
+        ("professional, insight-led language is recommended", lambda p: len((p.content or "").strip()) >= 40),
+        ("title should explain the value or learning", lambda p: len((p.title or "").strip()) >= 5),
+    ],
 }
 
 RISK_PATTERNS = [
@@ -53,9 +64,6 @@ def validate_content_payload(payload: ContentValidationRequest | dict[str, Any])
     if payload.platform == "LinkedIn" and len(payload.content.strip()) > 2200:
         warnings.append("LinkedIn post may be too long for easy reader comprehension; consider trimming it for clarity.")
 
-    if not payload.script and payload.platform == "YouTube":
-        warnings.append("Narration script is missing; a human reviewer should confirm the intended story before export.")
-
     if payload.title and len(payload.title.strip()) < 5:
         warnings.append("Title is very short and may be unclear to viewers.")
 
@@ -78,7 +86,12 @@ def validate_content_payload(payload: ContentValidationRequest | dict[str, Any])
                 break
 
     if payload.platform in PLATFORM_REQUIREMENTS:
-        platform_checks.extend(PLATFORM_REQUIREMENTS[payload.platform])
+        for description, check in PLATFORM_REQUIREMENTS[payload.platform]:
+            try:
+                met = bool(check(payload))
+            except Exception:
+                met = False
+            platform_checks.append(f"{description}: {'met' if met else 'NOT MET'}")
 
     if not errors and payload.title and payload.content:
         status = "passed"

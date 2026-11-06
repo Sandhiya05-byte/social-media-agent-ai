@@ -175,7 +175,12 @@ def retry_workflow(workflow_id: int):
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    return {"workflow_id": workflow_id, "status": context.workflow_id is not None and manager.get_workflow(workflow_id).status or "FAILED", "context": context.to_dict()}
+    persisted = manager.get_workflow(workflow_id)
+    return {
+        "workflow_id": workflow_id,
+        "status": persisted.status if persisted is not None else "FAILED",
+        "context": context.to_dict(),
+    }
 
 
 @router.post("/workflows/{workflow_id}/resume")

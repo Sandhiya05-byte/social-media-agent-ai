@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ContentValidationRequest(BaseModel):
@@ -53,6 +53,10 @@ class ContentRead(BaseModel):
     published_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
+    workflow_id: int | None = None
+    generation_source: str | None = None
+    media_url: str | None = None
+    thumbnail_url: str | None = None
+    subtitle_url: str | None = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

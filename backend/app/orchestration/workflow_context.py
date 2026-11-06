@@ -6,7 +6,7 @@ from typing import Any
 
 @dataclass
 class WorkflowContext:
-    workflow_id: str | None = None
+    workflow_id: int | None = None
     creator_id: int | None = None
     campaign_topic: str = ""
     target_audience: str = "general audience"
@@ -17,6 +17,7 @@ class WorkflowContext:
     research_findings: dict[str, Any] = field(default_factory=dict)
     competitor_findings: dict[str, Any] = field(default_factory=dict)
     hooks: list[str] = field(default_factory=list)
+    recommended_hook: str | None = None
     creative_output: dict[str, Any] = field(default_factory=dict)
     video_output: dict[str, Any] = field(default_factory=dict)
     validation_result: dict[str, Any] = field(default_factory=dict)
@@ -46,6 +47,7 @@ class WorkflowContext:
             research_findings=dict(data.get("research_findings") or {}),
             competitor_findings=dict(data.get("competitor_findings") or {}),
             hooks=list(data.get("hooks") or []),
+            recommended_hook=data.get("recommended_hook"),
             creative_output=dict(data.get("creative_output") or {}),
             video_output=dict(data.get("video_output") or {}),
             validation_result=dict(data.get("validation_result") or {}),
@@ -73,6 +75,7 @@ class WorkflowContext:
             "research_findings": self.research_findings,
             "competitor_findings": self.competitor_findings,
             "hooks": self.hooks,
+            "recommended_hook": self.recommended_hook,
             "creative_output": self.creative_output,
             "video_output": self.video_output,
             "validation_result": self.validation_result,

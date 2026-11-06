@@ -1,5 +1,7 @@
+import { API_BASE_URL } from './client';
+
 export async function generateCreative(payload) {
-  const response = await fetch('/api/creative/generate', {
+  const response = await fetch(`${API_BASE_URL}/api/creative/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),

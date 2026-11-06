@@ -1,4 +1,4 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
+export const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
 
 export async function fetchCreatorProfiles() {
   const response = await fetch(`${API_BASE_URL}/api/creators`);
@@ -27,16 +27,23 @@ export async function createCreatorProfile(payload) {
 }
 
 export async function fetchDashboard() {
-  return {
-    totalPosts: 24,
-    approved: 14,
-    scheduled: 9,
-    pipeline: 6,
-  };
+  const response = await fetch(`${API_BASE_URL}/api/dashboard/stats`);
+  if (!response.ok) {
+    throw new Error('Unable to load dashboard statistics.');
+  }
+  return response.json();
+}
+
+export async function fetchAgentStatus() {
+  const response = await fetch(`${API_BASE_URL}/api/dashboard/agent-status`);
+  if (!response.ok) {
+    throw new Error('Unable to load agent status.');
+  }
+  return response.json();
 }
 
 export async function runResearchWorkflow(payload) {
-  const response = await fetch('/api/research/workflow', {
+  const response = await fetch(`${API_BASE_URL}/api/research/workflow`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',

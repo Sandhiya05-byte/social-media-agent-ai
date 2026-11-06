@@ -40,6 +40,28 @@ def _ensure_workflow_checkpoint_columns() -> None:
             conn.execute(text(sql))
 
 
+def _ensure_content_item_columns() -> None:
+    with engine.begin() as conn:
+        inspector = inspect(conn)
+        if "content_items" not in inspector.get_table_names():
+            return
+
+        columns = {column["name"] for column in inspector.get_columns("content_items")}
+        required_columns = {
+            "workflow_id": "ALTER TABLE content_items ADD COLUMN workflow_id INTEGER",
+            "creator_id": "ALTER TABLE content_items ADD COLUMN creator_id INTEGER",
+            "generation_source": "ALTER TABLE content_items ADD COLUMN generation_source VARCHAR(60)",
+            "source_references": "ALTER TABLE content_items ADD COLUMN source_references JSON DEFAULT '[]'",
+        }
+        for column_name, sql in required_columns.items():
+            if column_name in columns:
+                continue
+            conn.execute(text(sql))
+        # Index for workflow lookups.
+        conn.execute(text("CREATE INDEX IF NOT EXISTS ix_content_items_workflow_id ON content_items (workflow_id)"))
+
+
 def init_db() -> None:
     Base.metadata.create_all(bind=engine)
     _ensure_workflow_checkpoint_columns()
+    _ensure_content_item_columns()

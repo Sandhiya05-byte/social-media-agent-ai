@@ -114,7 +114,7 @@ def test_checkpoint_keeps_prior_success_after_later_agent_fails():
         def execute(self, **kwargs):
             return {
                 "status": "completed",
-                "ranked_topic_suggestions": [{"title": "creator systems", "score": 92}],
+                "trending_subtopics": ["creator systems"],
                 "source_urls": ["https://example.com/rss-prior"],
             }
 
@@ -139,7 +139,7 @@ def test_checkpoint_keeps_prior_success_after_later_agent_fails():
     workflow = ExecutionManager().get_workflow(result.workflow_id)
     assert workflow is not None
     assert workflow.status == "FAILED"
-    assert workflow.checkpoint_data["agent_records"]["Trend Research Agent"]["ranked_topic_suggestions"][0]["title"] == "creator systems"
+    assert workflow.checkpoint_data["agent_records"]["Trend Research Agent"]["trending_subtopics"][0] == "creator systems"
     assert result.error_message == "simulated failure after successful checkpoint"
 
 
@@ -152,7 +152,7 @@ def test_successful_agent_execution_commits_checkpoint_and_completion_status(tmp
         def execute(self, **kwargs):
             return {
                 "status": "completed",
-                "ranked_topic_suggestions": [{"title": "systems", "score": 91}],
+                "trending_subtopics": ["systems"],
                 "source_urls": ["https://example.com/rss-success"],
             }
 
@@ -186,7 +186,7 @@ def test_pending_approval_blocks_scheduling_and_preserves_last_successful_agent(
         def execute(self, **kwargs):
             return {
                 "status": "completed",
-                "ranked_topic_suggestions": [{"title": "creative loops", "score": 88}],
+                "trending_subtopics": ["creative loops"],
                 "source_urls": ["https://example.com/rss-approval"],
             }
 
@@ -222,7 +222,7 @@ def test_final_checkpoint_failure_does_not_persist_false_success(tmp_path, monke
         def execute(self, **kwargs):
             return {
                 "status": "completed",
-                "ranked_topic_suggestions": [{"title": "creative loops", "score": 88}],
+                "trending_subtopics": ["creative loops"],
                 "source_urls": ["https://example.com/rss-atomic"],
             }
 
@@ -261,7 +261,7 @@ def test_final_checkpoint_failure_does_not_persist_false_success(tmp_path, monke
     assert workflow is not None
     assert workflow.status == "FAILED"
     assert "simulated final checkpoint failure" in workflow.error_message
-    assert workflow.checkpoint_data["agent_records"]["Trend Research Agent"]["ranked_topic_suggestions"][0]["title"] == "creative loops"
+    assert workflow.checkpoint_data["agent_records"]["Trend Research Agent"]["trending_subtopics"][0] == "creative loops"
     assert workflow.checkpoint_data["agent_records"]["Trend Research Agent"]["status"].upper() == "COMPLETED"
 
 
@@ -274,7 +274,7 @@ def test_agent_execution_remains_running_until_checkpoint_commit_succeeds(tmp_pa
         def execute(self, **kwargs):
             return {
                 "status": "completed",
-                "ranked_topic_suggestions": [{"title": "checkpoint order", "score": 95}],
+                "trending_subtopics": ["checkpoint order"],
                 "source_urls": ["https://example.com/rss-order"],
             }
 
@@ -324,7 +324,7 @@ def test_checkpoint_failure_marks_corresponding_agent_execution_failed(tmp_path,
         def execute(self, **kwargs):
             return {
                 "status": "completed",
-                "ranked_topic_suggestions": [{"title": "failed checkpoint", "score": 80}],
+                "trending_subtopics": ["failed checkpoint"],
                 "source_urls": ["https://example.com/rss-failure"],
             }
 
@@ -377,7 +377,7 @@ def test_no_agent_execution_row_stays_completed_when_checkpoint_failed(tmp_path,
         def execute(self, **kwargs):
             return {
                 "status": "completed",
-                "ranked_topic_suggestions": [{"title": "no completed leak", "score": 74}],
+                "trending_subtopics": ["no completed leak"],
                 "source_urls": ["https://example.com/rss-leak"],
             }
 
@@ -429,7 +429,7 @@ def test_resume_workflow_retries_only_failed_agent_and_preserves_completed_outpu
             type(self).calls += 1
             return {
                 "status": "completed",
-                "ranked_topic_suggestions": [{"title": "initial topic", "score": 91}],
+                "trending_subtopics": ["initial topic"],
                 "source_urls": ["https://example.com/rss-resume"],
             }
 
@@ -488,7 +488,7 @@ def test_retry_count_increments_when_retry_attempt_starts(tmp_path, monkeypatch)
 
     class SuccessAgent:
         def execute(self, **kwargs):
-            return {"status": "completed", "ranked_topic_suggestions": [{"title": "stable topic", "score": 90}], "source_urls": ["https://example.com/rss-retry"]}
+            return {"status": "completed", "trending_subtopics": ["stable topic"], "source_urls": ["https://example.com/rss-retry"]}
 
     class FlakyAgent:
         calls = 0
@@ -536,7 +536,7 @@ def test_retry_limit_is_enforced_before_retry_is_allowed(tmp_path, monkeypatch):
 
     class SuccessAgent:
         def execute(self, **kwargs):
-            return {"status": "completed", "ranked_topic_suggestions": [{"title": "limit topic", "score": 80}], "source_urls": ["https://example.com/rss-limit"]}
+            return {"status": "completed", "trending_subtopics": ["limit topic"], "source_urls": ["https://example.com/rss-limit"]}
 
     class FlakyAgent:
         calls = 0
@@ -700,7 +700,7 @@ def test_valid_approved_workflow_can_resume_successfully(tmp_path, monkeypatch):
         def execute(self, **kwargs):
             return {
                 "status": "completed",
-                "ranked_topic_suggestions": [{"title": "resumable topic", "score": 97}],
+                "trending_subtopics": ["resumable topic"],
                 "source_urls": ["https://example.com/rss-resume-valid"],
             }
 
@@ -724,20 +724,94 @@ def test_valid_approved_workflow_can_resume_successfully(tmp_path, monkeypatch):
                 return PublishAgent()
             raise KeyError(name)
 
-    context = WorkflowContext(campaign_topic="approved resume", platforms=["Instagram"])
-    workflow = manager.create_workflow(context)
-    hash_value = WorkflowEngine._content_fingerprint(context)
+    class ResearchOnlyRegistry(DummyRegistry):
+        def execution_order(self):
+            return ["Trend Research Agent"]
 
-    with manager.session_factory() as session:
-        wf = session.get(Workflow, workflow.id)
-        wf.status = "APPROVED"
-        wf.approval_status = "APPROVED"
-        wf.approval_content_hash = hash_value
-        session.commit()
+    context = WorkflowContext(campaign_topic="approved resume", platforms=["Instagram"])
+    engine = WorkflowEngine(registry=ResearchOnlyRegistry(), execution_manager=manager)
+    result = engine.run(context)
+    workflow = manager.get_workflow(result.workflow_id)
+    assert workflow is not None
+    assert workflow.status == "WAITING_FOR_APPROVAL"
+
+    approved_context = manager.get_workflow_context(workflow.id)
+    assert approved_context is not None
+    manager.record_approval_decision(
+        workflow.id,
+        "APPROVED",
+        approved_by="reviewer",
+        notes="Approved after generation.",
+        content_hash=WorkflowEngine._content_fingerprint(approved_context),
+    )
 
     engine = WorkflowEngine(registry=DummyRegistry(), execution_manager=manager)
     resumed = engine.resume_workflow(workflow.id)
     assert resumed.workflow_id == workflow.id
+    publish_execution = manager.get_agent_execution(workflow.id, "Publishing and Scheduling Agent")
+    assert publish_execution is not None
+    assert publish_execution.status == "COMPLETED"
+
+
+def test_resume_failed_workflow_blocks_publishing_without_approval(tmp_path, monkeypatch):
+    manager = _create_isolated_execution_manager(tmp_path, monkeypatch)
+    publish_calls = {"count": 0}
+
+    class FlakyTrendAgent:
+        name = "Trend Research Agent"
+        calls = 0
+
+        def execute(self, **kwargs):
+            type(self).calls += 1
+            if type(self).calls == 1:
+                raise RuntimeError("trend agent needs a retry")
+            return {
+                "status": "completed",
+                "trending_subtopics": ["retried topic"],
+                "source_urls": ["https://example.com/rss-retried"],
+            }
+
+    class PublishAgent:
+        name = "Publishing and Scheduling Agent"
+
+        def execute(self, **kwargs):
+            publish_calls["count"] += 1
+            return {"status": "completed"}
+
+    class DummyRegistry:
+        def register_default_agents(self):
+            return None
+
+        def execution_order(self):
+            return ["Trend Research Agent", "Publishing and Scheduling Agent"]
+
+        def get(self, name):
+            if name == "Trend Research Agent":
+                return FlakyTrendAgent()
+            if name == "Publishing and Scheduling Agent":
+                return PublishAgent()
+            raise KeyError(name)
+
+    engine = WorkflowEngine(registry=DummyRegistry(), execution_manager=manager)
+    context = WorkflowContext(campaign_topic="resume approval guard", platforms=["Instagram"])
+    result = engine.run(context)
+
+    workflow = manager.get_workflow(result.workflow_id)
+    assert workflow is not None
+    assert workflow.status == "FAILED"
+    assert publish_calls["count"] == 0
+
+    resumed = engine.resume_workflow(workflow.id)
+    assert resumed.workflow_id == workflow.id
+    assert publish_calls["count"] == 0
+
+    persisted = manager.get_workflow(workflow.id)
+    assert persisted is not None
+    assert persisted.status == "WAITING_FOR_APPROVAL"
+    assert persisted.approval_status == "PENDING"
+    trend_execution = manager.get_agent_execution(workflow.id, "Trend Research Agent")
+    assert trend_execution is not None
+    assert trend_execution.status == "COMPLETED"
 
 
 def test_scheduling_boundary_rejects_persisted_approval_mismatch_and_never_executes_publish_agent(tmp_path, monkeypatch):
@@ -750,7 +824,7 @@ def test_scheduling_boundary_rejects_persisted_approval_mismatch_and_never_execu
         def execute(self, **kwargs):
             return {
                 "status": "completed",
-                "ranked_topic_suggestions": [{"title": "publish blocked", "score": 90}],
+                "trending_subtopics": ["publish blocked"],
                 "source_urls": ["https://example.com/rss-publish-blocked"],
             }
 
@@ -828,7 +902,7 @@ def test_workflow_waits_for_human_approval_after_generation(tmp_path, monkeypatc
         def execute(self, **kwargs):
             return {
                 "status": "completed",
-                "ranked_topic_suggestions": [{"title": "approval gate", "score": 90}],
+                "trending_subtopics": ["approval gate"],
                 "source_urls": ["https://example.com/rss-approval"],
             }
 
@@ -862,7 +936,7 @@ def test_workflow_approval_persists_and_matches_content_version(tmp_path, monkey
         def execute(self, **kwargs):
             return {
                 "status": "completed",
-                "ranked_topic_suggestions": [{"title": "approved topic", "score": 93}],
+                "trending_subtopics": ["approved topic"],
                 "source_urls": ["https://example.com/rss-approved"],
             }
 
@@ -908,7 +982,7 @@ def test_rejected_workflow_cannot_resume_until_new_approval(tmp_path, monkeypatc
         def execute(self, **kwargs):
             return {
                 "status": "completed",
-                "ranked_topic_suggestions": [{"title": "rejected topic", "score": 82}],
+                "trending_subtopics": ["rejected topic"],
                 "source_urls": ["https://example.com/rss-rejected"],
             }
 

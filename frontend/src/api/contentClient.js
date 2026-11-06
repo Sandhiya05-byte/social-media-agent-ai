@@ -1,4 +1,4 @@
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || '';
+import { API_BASE_URL } from './client';
 
 export async function validateContent(payload) {
   const response = await fetch(`${API_BASE_URL}/api/content/validate`, {
@@ -35,6 +35,19 @@ export async function fetchContentItems() {
   if (!response.ok) {
     throw new Error('Unable to load content queue.');
   }
+  return response.json();
+}
+
+export async function addWorkflowContentToReview(workflowId) {
+  const response = await fetch(`${API_BASE_URL}/api/content/from-workflow/${workflowId}`, {
+    method: 'POST',
+  });
+
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.detail || 'Unable to add workflow content to the review queue.');
+  }
+
   return response.json();
 }
 

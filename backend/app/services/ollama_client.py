@@ -40,12 +40,33 @@ class OllamaModel(ModelInterface):
         logger.warning("Ollama response rejected; using template fallback.")
         return self.fallback.generate(prompt, context)
 
+    @staticmethod
+    def _build_prompt(prompt: str, context: dict[str, Any]) -> str:
+        """Embed agent context into the prompt as a JSON block.
+
+        Ollama's `/api/generate` `context` field expects a token-context
+        array, not an arbitrary dictionary — sending a dictionary there
+        causes HTTP 400. Agent context is preserved by serializing it into
+        the prompt instead.
+        """
+        json_instruction = (
+            "\n\nRespond ONLY with a single valid JSON object. "
+            "Do not include any text outside of the JSON object."
+        )
+        if not context:
+            return prompt + json_instruction
+        context_block = "\n\nCONTEXT (JSON):\n" + json.dumps(context, sort_keys=True, default=str)
+        return prompt + context_block + json_instruction
+
     def _generate_via_ollama(self, prompt: str, context: dict[str, Any]) -> str | None:
         payload = json.dumps({
             "model": self.model_name,
-            "prompt": prompt,
-            "context": context,
+            "prompt": self._build_prompt(prompt, context),
+            # No `context` field: Ollama expects a token array there, not a dict.
             "stream": False,
+            "format": "json",
+            # Bound generation so a 3B model cannot stall the workflow.
+            "options": {"num_predict": 700},
         }).encode("utf-8")
         request = urllib.request.Request(
             f"{self.base_url}/api/generate",

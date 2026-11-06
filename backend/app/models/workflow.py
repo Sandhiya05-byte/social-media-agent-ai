@@ -6,6 +6,7 @@ from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.database import Base
+from app.time_utils import utcnow
 
 
 class Workflow(Base):
@@ -20,8 +21,8 @@ class Workflow(Base):
     content_type: Mapped[str] = mapped_column(String(120), nullable=False, default="short-form")
     status: Mapped[str] = mapped_column(String(40), default="CREATED", nullable=False)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow, onupdate=utcnow, nullable=False)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     execution_summary: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)
     checkpoint_data: Mapped[dict] = mapped_column(JSON, default=dict, nullable=False)

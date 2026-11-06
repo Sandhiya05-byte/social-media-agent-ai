@@ -70,9 +70,15 @@ class ResearchWorkflow:
             "workflow_id": f"research-{int(datetime.now(timezone.utc).timestamp())}",
             "status": "completed",
             "agent_statuses": agent_statuses,
-            "ranked_topic_suggestions": trend_result.get("ranked_topic_suggestions", []),
+            # New retrieval-driven fields (with legacy keys kept populated).
+            "ranked_topic_suggestions": trend_result.get("trending_subtopics", []),
+            "source_references": trend_result.get("source_references", []),
+            "provider_statuses": trend_result.get("provider_statuses", {}),
+            "provider_limitations": trend_result.get("provider_limitations", []),
             "competitor_observations": competitor_result.get("observations", []),
+            "competitor_source_references": competitor_result.get("source_references", []),
             "content_gap_suggestions": content_gap_suggestions,
             "creator_style_scripts": scripts,
             "hook_alternatives": hook_result.get("hook_alternatives", []),
+            "recommended_hook": hook_result.get("recommended_hook"),
         }

@@ -8,8 +8,9 @@ from app.agents.base import BaseAgent
 class BrandVoiceAgent(BaseAgent):
     name = "Brand Voice Agent"
 
-    def execute(self, niche: str, creator_samples: list[str] | None = None, **kwargs) -> dict[str, Any]:
+    def execute(self, niche: str, creator_samples: list[str] | None = None, target_audience: str | None = None, campaign_objective: str | None = None, research_results: dict | None = None, **kwargs) -> dict[str, Any]:
         self.status = "running"
+        started_at = self._now()
         samples = creator_samples or [
             "I help founders turn audience attention into real confidence and repeatable growth.",
             "The goal is not perfection. It is clarity, consistency, and a system that compounds over time.",
@@ -31,12 +32,31 @@ class BrandVoiceAgent(BaseAgent):
             voice_profile = model_voice_profile
 
         self.status = "completed"
+        # Topic-aware additions: the profile adapts to the current campaign's
+        # audience/objective while the base voice profile stays honest.
+        audience = (target_audience or "general audience").strip()
+        objective = (campaign_objective or "content growth").strip()
+        topics = [
+            (s.get("title") or "")[:80]
+            for s in ((research_results or {}).get("source_references") or [])[:5]
+            if s.get("title")
+        ]
+        voice_profile["campaign_context"] = {
+            "niche": niche,
+            "target_audience": audience,
+            "objective": objective,
+            "topics_from_research": topics,
+        }
         return {
             "agent": self.name,
             "status": self.status,
-            "started_at": self._now(),
+            "started_at": started_at,
             "completed_at": self._now(),
+            "niche": niche,
             "creator_samples": samples,
             "voice_profile": voice_profile,
-            "summary": payload.get("summary") or f"Brand voice profile created for {niche}.",
+            "summary": (
+                f"Brand voice profile for '{niche}' targeting {audience} "
+                f"(objective: {objective[:60]})."
+            ),
         }

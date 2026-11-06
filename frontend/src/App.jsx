@@ -13,7 +13,13 @@ import { motion } from 'framer-motion';
 
 import { Sidebar } from './components/Sidebar';
 import { TopNav } from './components/TopNav';
-import { createCreatorProfile, fetchCreatorProfiles, fetchDashboard, runResearchWorkflow } from './api/client';
+import {
+  API_BASE_URL,
+  createCreatorProfile,
+  fetchCreatorProfiles,
+  fetchDashboard,
+  runResearchWorkflow,
+} from './api/client';
 import {
   approveContent,
   cancelSchedule,
@@ -24,10 +30,44 @@ import {
   rescheduleContent,
   scheduleContent,
   validateContent,
+  addWorkflowContentToReview,
 } from './api/contentClient';
 import { generateCreative } from './api/creativeClient';
-import { fetchWorkflowStatus, runWorkflow } from './api/orchestrationClient';
+import {
+  approveWorkflow,
+  fetchWorkflowStatus,
+  rejectWorkflow,
+  requestWorkflowChanges,
+  resumeWorkflow,
+  runWorkflow,
+} from './api/orchestrationClient';
 import { agentStatus, sampleCreator, sidebarItems, workflowSteps } from './data/demoData';
+import { ServiceHealthPanel } from './components/ServiceHealthPanel';
+
+const CALENDAR_DAYS = Array.from({ length: 7 }, (_, index) => {
+  const date = new Date();
+  date.setDate(date.getDate() + index);
+  return date;
+});
+
+function parseUtcDate(value) {
+  if (!value) {
+    return null;
+  }
+  const normalized = /(?:Z|[+-]\d{2}:\d{2})$/.test(value) ? value : `${value}Z`;
+  const date = new Date(normalized);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
+
+function toLocalInputValue(value) {
+  const date = value instanceof Date ? value : parseUtcDate(value);
+  if (!date) {
+    return '';
+  }
+  return new Date(date.getTime() - date.getTimezoneOffset() * 60000)
+    .toISOString()
+    .slice(0, 16);
+}
 
 const defaultForm = {
   name: sampleCreator.name,
@@ -91,11 +131,11 @@ function App() {
   const [contentQueue, setContentQueue] = useState([]);
   const [approvalLoading, setApprovalLoading] = useState(false);
   const [scheduleContentId, setScheduleContentId] = useState('');
+  const [sendToReviewLoading, setSendToReviewLoading] = useState(false);
   const [scheduleView, setScheduleView] = useState('weekly');
-  const [scheduleDateTime, setScheduleDateTime] = useState(() => {
-    const nextHour = new Date(Date.now() + 60 * 60 * 1000);
-    return new Date(nextHour.getTime() - nextHour.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
-  });
+  const [scheduleDateTime, setScheduleDateTime] = useState(() =>
+    toLocalInputValue(new Date(Date.now() + 60 * 60 * 1000)),
+  );
 
   useEffect(() => {
     const loadCreator = async () => {
@@ -116,21 +156,28 @@ function App() {
             authorized_for_avatar_use: latest.authorized_for_avatar_use,
           });
         }
-      } catch (loadError) {
+      } catch {
         setCreator(sampleCreator);
       }
 
       try {
         const dashboard = await fetchDashboard();
-        setMetrics(dashboard);
-      } catch (dashboardError) {
-        setMetrics({ totalPosts: 24, approved: 14, scheduled: 9, pipeline: 6 });
+        setMetrics({
+          totalPosts: dashboard.content?.total ?? 0,
+          approved: (dashboard.content?.by_status?.Approved || 0) + (dashboard.content?.by_status?.Scheduled || 0),
+          scheduled: dashboard.content?.scheduled ?? 0,
+          pipeline:
+            (dashboard.content?.by_status?.['Awaiting Approval'] || 0) +
+            (dashboard.content?.by_status?.['Validation Failed'] || 0),
+        });
+      } catch {
+        setMetrics({ totalPosts: 0, approved: 0, scheduled: 0, pipeline: 0 });
       }
 
       try {
         const items = await fetchContentItems();
         setContentQueue(items);
-      } catch (queueError) {
+      } catch {
         setContentQueue([]);
       }
     };
@@ -143,30 +190,36 @@ function App() {
       return undefined;
     }
 
-    let cancelled = false;
-    let timer = null;
-    let inFlight = false;
+    const pollState = { cancelled: false, timer: null, inFlight: false };
 
-    const terminalStatuses = new Set(['COMPLETED', 'FAILED', 'CANCELLED', 'REJECTED', 'SCHEDULED']);
+    const terminalStatuses = new Set([
+      'COMPLETED',
+      'FAILED',
+      'CANCELLED',
+      'REJECTED',
+      'SCHEDULED',
+      'WAITING_FOR_APPROVAL',
+      'APPROVED',
+    ]);
 
     const stopPolling = () => {
-      cancelled = true;
-      if (timer) {
-        clearInterval(timer);
-        timer = null;
+      pollState.cancelled = true;
+      if (pollState.timer) {
+        clearInterval(pollState.timer);
+        pollState.timer = null;
       }
     };
 
     const pollWorkflow = async () => {
-      if (inFlight || cancelled) {
+      if (pollState.inFlight || pollState.cancelled) {
         return;
       }
 
-      inFlight = true;
+      pollState.inFlight = true;
 
       try {
         const latest = await fetchWorkflowStatus(workflowResult.workflow_id);
-        if (cancelled) {
+        if (pollState.cancelled) {
           return;
         }
 
@@ -210,12 +263,12 @@ function App() {
           stopPolling();
         }
       } finally {
-        inFlight = false;
+        pollState.inFlight = false;
       }
     };
 
     pollWorkflow();
-    timer = setInterval(pollWorkflow, 4000);
+    pollState.timer = setInterval(pollWorkflow, 4000);
 
     return () => {
       stopPolling();
@@ -224,11 +277,11 @@ function App() {
 
   const heroCards = useMemo(
     () => [
-      { label: 'Pipeline health', value: '92%', tone: 'violet' },
-      { label: 'Content approvals', value: '14', tone: 'cyan' },
-      { label: 'Ready to publish', value: '9', tone: 'emerald' },
+      { label: 'Pipeline health', value: metrics.pipeline > 0 ? `${metrics.pipeline} in review` : 'Idle', tone: 'violet' },
+      { label: 'Content approvals', value: String(metrics.pendingApprovals ?? metrics.approved), tone: 'cyan' },
+      { label: 'Ready to publish', value: String(metrics.scheduled), tone: 'emerald' },
     ],
-    [],
+    [metrics],
   );
 
   const handleInputChange = (event) => {
@@ -338,8 +391,85 @@ function App() {
         { workflow_id: result.workflow_id, status: result.status },
         ...previous.filter((item) => item.workflow_id !== result.workflow_id),
       ].slice(0, 5));
+
+      // Clear stale defaults: the new campaign's own generated output
+      // replaces any previous campaign's form values.
+      const creative = result?.context?.creative_output || {};
+      const video = result?.context?.video_output || {};
+      setContentForm({
+        title: creative.title || workflowForm.campaign_topic,
+        platform: payload.platforms[0] || 'Instagram',
+        content: creative.content || '',
+        script: creative.script || '',
+        captions: (creative.captions || []).join(', '),
+        media_path: video.video_url || '',
+      });
+      await refreshQueue();
     } catch (submitError) {
       setWorkflowError(submitError.message || 'Workflow orchestration failed.');
+    } finally {
+      setWorkflowLoading(false);
+    }
+  };
+
+  const handleWorkflowDecision = async (action) => {
+    const workflowId = workflowResult?.workflow_id;
+    if (!workflowId) {
+      return;
+    }
+
+    setWorkflowLoading(true);
+    setWorkflowError('');
+
+    try {
+      let result;
+      if (action === 'approve') {
+        await approveWorkflow(workflowId, {
+          approved_by: 'creator',
+          notes: 'Approved from the command center.',
+        });
+        result = await resumeWorkflow(workflowId);
+      } else if (action === 'reject') {
+        result = await rejectWorkflow(workflowId, {
+          approved_by: 'creator',
+          notes: 'Rejected from the command center.',
+        });
+      } else {
+        result = await requestWorkflowChanges(workflowId, {
+          approved_by: 'creator',
+          notes: 'Changes requested from the command center.',
+        });
+      }
+
+      if (result?.workflow_id) {
+        setWorkflowResult(result);
+        setWorkflowHistory((previous) =>
+          previous.map((item) =>
+            item.workflow_id === result.workflow_id ? { ...item, status: result.status } : item,
+          ),
+        );
+      }
+    } catch (decisionError) {
+      setWorkflowError(decisionError.message || 'Workflow approval action failed.');
+      try {
+        const latest = await fetchWorkflowStatus(workflowId);
+        setWorkflowResult((previous) =>
+          previous
+            ? {
+                ...previous,
+                status: latest.status,
+                context: {
+                  ...(previous.context || {}),
+                  ...(latest.execution_summary
+                    ? { execution_summary: latest.execution_summary }
+                    : {}),
+                },
+              }
+            : previous,
+        );
+      } catch (refreshError) {
+        void refreshError;
+      }
     } finally {
       setWorkflowLoading(false);
     }
@@ -372,15 +502,18 @@ function App() {
 
       const result = await generateCreative(payload);
       setCreativeResult(result);
+      const videoUrl = result?.video?.video_url || '';
       setContentForm({
-        ...contentForm,
-        title: creativeForm.title,
+        title: result?.creative?.title || creativeForm.title,
         platform: creativeForm.platform,
-        content: creativeForm.content,
-        script: creativeForm.script,
-        captions: creativeForm.captions,
-        media_path: result?.creative?.preview_url || '/generated/creative/instagram_creator_growth_playbook.png',
+        content: result?.creative?.content || creativeForm.content,
+        script: result?.creative?.script || creativeForm.script,
+        captions: (result?.creative?.captions || []).join(', ') || creativeForm.captions,
+        media_path: videoUrl,
       });
+      if (!videoUrl) {
+        setCreativeError('Video render failed - no MP4 was produced. Check the render error above.');
+      }
     } catch (submitError) {
       setCreativeError(submitError.message || 'Creative generation failed.');
     } finally {
@@ -392,11 +525,31 @@ function App() {
     try {
       const items = await fetchContentItems();
       setContentQueue(items);
-      if (items.length > 0) {
-        setScheduleContentId(items[0].id);
+      const schedulable = items.find(
+        (item) => item.status === 'Approved' || item.status === 'Scheduled',
+      );
+      if (schedulable) {
+        setScheduleContentId(String(schedulable.id));
       }
-    } catch (fetchError) {
+    } catch {
       setContentQueue([]);
+    }
+  };
+
+  const handleSendWorkflowToReview = async () => {
+    const workflowId = workflowResult?.workflow_id;
+    if (!workflowId) {
+      return;
+    }
+    setSendToReviewLoading(true);
+    setValidationError('');
+    try {
+      await addWorkflowContentToReview(workflowId);
+      await refreshQueue();
+    } catch (reviewError) {
+      setValidationError(reviewError.message || 'Unable to send workflow content to review.');
+    } finally {
+      setSendToReviewLoading(false);
     }
   };
 
@@ -466,8 +619,8 @@ function App() {
         await requestChanges(contentId, notes);
       }
       await refreshQueue();
-    } catch (queueError) {
-      setValidationError(queueError.message || 'Approval action failed.');
+    } catch (approvalError) {
+      setValidationError(approvalError.message || 'Approval action failed.');
     } finally {
       setApprovalLoading(false);
     }
@@ -483,10 +636,29 @@ function App() {
     }
 
     try {
-      await scheduleContent(scheduleContentId, new Date(scheduleDateTime).toISOString());
+      const selectedItem = contentQueue.find(
+        (item) => String(item.id) === String(scheduleContentId),
+      );
+      const scheduledFor = new Date(scheduleDateTime).toISOString();
+
+      if (selectedItem?.status === 'Scheduled') {
+        await rescheduleContent(scheduleContentId, scheduledFor);
+      } else {
+        await scheduleContent(scheduleContentId, scheduledFor);
+      }
       await refreshQueue();
     } catch (submitError) {
       setValidationError(submitError.message || 'Scheduling failed.');
+    }
+  };
+
+  const handleCancelSchedule = async (contentId) => {
+    setValidationError('');
+    try {
+      await cancelSchedule(contentId);
+      await refreshQueue();
+    } catch (cancelError) {
+      setValidationError(cancelError.message || 'Unable to cancel the schedule.');
     }
   };
 
@@ -494,11 +666,8 @@ function App() {
     ? Object.entries(workflowResult.context.agent_records)
     : [];
 
-  const calendarDays = Array.from({ length: 7 }, (_, index) => {
-    const date = new Date();
-    date.setDate(date.getDate() + index);
-    return date;
-  });
+  const calendarDays =
+    scheduleView === 'daily' ? CALENDAR_DAYS.slice(0, 1) : CALENDAR_DAYS;
 
   const scheduledItems = contentQueue.filter((item) => item.status === 'Scheduled' && item.scheduled_for);
 
@@ -557,6 +726,8 @@ function App() {
                 ))}
               </div>
             </section>
+
+            <ServiceHealthPanel />
 
             <section className="grid gap-6 xl:grid-cols-[1.3fr_0.7fr]">
               <div className="rounded-3xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-slate-950/30">
@@ -686,6 +857,37 @@ function App() {
                     </span>
                   </div>
 
+                  {['WAITING_FOR_APPROVAL', 'PENDING', 'APPROVED'].includes(
+                    String(workflowResult.status || '').toUpperCase(),
+                  ) && (
+                    <div className="flex flex-wrap gap-2">
+                      <button
+                        type="button"
+                        onClick={() => handleWorkflowDecision('approve')}
+                        disabled={workflowLoading}
+                        className="rounded-lg bg-emerald-500/20 px-3 py-1.5 text-xs font-medium text-emerald-200 disabled:opacity-50"
+                      >
+                        {workflowLoading ? 'Working...' : 'Approve & run publishing agent'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleWorkflowDecision('changes')}
+                        disabled={workflowLoading}
+                        className="rounded-lg bg-amber-500/20 px-3 py-1.5 text-xs font-medium text-amber-200 disabled:opacity-50"
+                      >
+                        Request changes
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleWorkflowDecision('reject')}
+                        disabled={workflowLoading}
+                        className="rounded-lg bg-red-500/20 px-3 py-1.5 text-xs font-medium text-red-200 disabled:opacity-50"
+                      >
+                        Reject
+                      </button>
+                    </div>
+                  )}
+
                   <div className="grid gap-3 md:grid-cols-3">
                     <div className="rounded-xl border border-slate-800 bg-slate-900 p-3">
                       <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Platform(s)</p>
@@ -711,6 +913,66 @@ function App() {
                       </div>
                     ))}
                   </div>
+
+                  {workflowResult?.workflow_id && (
+                    <button
+                      type="button"
+                      onClick={handleSendWorkflowToReview}
+                      disabled={workflowLoading || sendToReviewLoading}
+                      className="w-full rounded-xl border border-cyan-500/40 bg-cyan-500/10 px-4 py-2.5 text-sm font-semibold text-cyan-200 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {sendToReviewLoading ? 'Adding to review...' : 'Send generated content to Content Studio review'}
+                    </button>
+                  )}
+
+                  {(() => {
+                    const video = workflowResult?.context?.video_output || {};
+                    if (!video.video_url && !video.render_error) return null;
+                    return (
+                      <div className="mt-3 rounded-2xl border border-slate-800 bg-slate-950/60 p-3">
+                        <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Generated video</p>
+                        {video.video_url && video.video_format === 'mp4' ? (
+                          <video src={`${API_BASE_URL}${video.video_url}`} controls playsInline className="mt-2 w-full rounded-xl border border-slate-700 bg-black" />
+                        ) : video.video_url ? (
+                          <p className="mt-2 text-sm text-amber-200">Offline fallback render (GIF, no sound) — MP4 rendering failed.</p>
+                        ) : (
+                          <p className="mt-2 text-sm text-red-200">Video generation failed: {video.render_error || video.tts_error}</p>
+                        )}
+                        {video.duration_seconds != null && (
+                          <p className="mt-2 text-xs text-slate-300">
+                            {Math.round(video.duration_seconds)}s · {video.video_width}x{video.video_height} · audio {video.audio_enabled ? 'on' : 'off'} · engine {video.render_engine}
+                          </p>
+                        )}
+                        {(() => {
+                          const creative = workflowResult?.context?.creative_output || {};
+                          const gen = creative.generation_source || workflowResult?.context?.agent_records?.['AI Clone and Creative Agent']?.generation_source;
+                          return gen ? (
+                            <p className={`mt-1 text-xs ${gen === 'ollama' ? 'text-emerald-300' : 'text-amber-300'}`}>
+                              Generation source: {gen}{gen !== 'ollama' ? ' (template fallback)' : ' (local model)'}
+                            </p>
+                          ) : null;
+                        })()}
+                        {(() => {
+                          const research = workflowResult?.context?.research_findings || {};
+                          const sources = research.source_references || [];
+                          if (!sources.length) return null;
+                          return (
+                            <details className="mt-2 rounded-xl border border-slate-800 bg-slate-900/60 p-2 text-xs text-slate-300">
+                              <summary className="cursor-pointer text-slate-200">Research sources ({sources.length})</summary>
+                              <ul className="mt-2 space-y-1">
+                                {sources.slice(0, 8).map((s, i) => (
+                                  <li key={i}>
+                                    <a href={s.url} target="_blank" rel="noreferrer" className="text-cyan-300 underline">{(s.title || s.url || '').slice(0, 80)}</a>
+                                    <span className="ml-2 text-slate-500">[{s.provider}]</span>
+                                  </li>
+                                ))}
+                              </ul>
+                            </details>
+                          );
+                        })()}
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
 
@@ -845,6 +1107,52 @@ function App() {
                         </span>
                       </div>
                     ))}
+
+                    {(() => {
+                      const statuses = researchResult.provider_statuses || {};
+                      const entries = Object.entries(statuses);
+                      if (!entries.length) return null;
+                      return (
+                        <div className="rounded-xl border border-slate-800 bg-slate-900/70 p-3">
+                          <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Research providers</p>
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {entries.map(([name, status]) => (
+                              <span key={name} className={`rounded-full px-2 py-1 text-[10px] font-medium uppercase tracking-[0.16em] ${
+                                status === 'ok' ? 'bg-emerald-500/10 text-emerald-300' : status === 'unconfigured' || status === 'unavailable' ? 'bg-slate-700 text-slate-300' : 'bg-amber-500/10 text-amber-300'
+                              }`}>
+                                {name}: {status}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      );
+                    })()}
+
+                    {(() => {
+                      const sources = researchResult.source_references || [];
+                      if (!sources.length) return null;
+                      return (
+                        <details className="rounded-xl border border-slate-800 bg-slate-900/70 p-3 text-xs text-slate-300">
+                          <summary className="cursor-pointer text-slate-200">Research sources ({sources.length})</summary>
+                          <ul className="mt-2 space-y-1">
+                            {sources.slice(0, 10).map((s, i) => (
+                              <li key={i}>
+                                <a href={s.url} target="_blank" rel="noreferrer" className="text-cyan-300 underline">{(s.title || s.url || '').slice(0, 80)}</a>
+                                <span className="ml-2 text-slate-500">[{s.provider}]</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </details>
+                      );
+                    })()}
+
+                    {(researchResult.provider_limitations || []).length > 0 && (
+                      <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
+                        {researchResult.provider_limitations.slice(0, 4).map((lim, i) => (
+                          <p key={i}>{lim}</p>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 )}
               </div>
@@ -952,7 +1260,7 @@ function App() {
                   <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Creative preview</p>
                   <h3 className="mt-1 text-xl font-semibold text-white">Branded media output</h3>
                   <img
-                    src={creativeResult.creative?.preview_url ? `http://localhost:8001${creativeResult.creative.preview_url}` : ''}
+                    src={creativeResult.creative?.preview_url ? `${API_BASE_URL}${creativeResult.creative.preview_url}` : ''}
                     alt="Generated creative preview"
                     className="mt-4 h-72 w-full rounded-2xl border border-slate-700 object-cover"
                   />
@@ -961,11 +1269,76 @@ function App() {
                 <div className="rounded-3xl border border-slate-800 bg-slate-900/80 p-5 shadow-xl shadow-slate-950/30">
                   <p className="text-xs uppercase tracking-[0.2em] text-slate-400">Video render</p>
                   <h3 className="mt-1 text-xl font-semibold text-white">Export details</h3>
-                  <div className="mt-4 space-y-3 rounded-2xl border border-slate-800 bg-slate-950/60 p-3 text-sm text-slate-200">
-                    <p>Video: {creativeResult.video?.video_path}</p>
-                    <p>Thumbnail: {creativeResult.video?.thumbnail_path}</p>
-                    <p>Subtitles: {creativeResult.video?.subtitle_path}</p>
-                    <p>{creativeResult.video?.limits}</p>
+
+                  {creativeResult.video?.video_url && creativeResult.video?.video_format === 'mp4' ? (
+                    <video
+                      key={creativeResult.video.video_url}
+                      src={`${API_BASE_URL}${creativeResult.video.video_url}`}
+                      controls
+                      playsInline
+                      className="mt-4 w-full rounded-2xl border border-slate-700 bg-black"
+                    />
+                  ) : creativeResult.video?.video_url ? (
+                    <div className="mt-4 rounded-2xl border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-200">
+                      <p className="font-medium">Offline fallback render (GIF, no sound)</p>
+                      <p className="mt-1">MP4 rendering failed, so a silent animated preview was generated instead.</p>
+                      <img
+                        src={`${API_BASE_URL}${creativeResult.video.video_url}`}
+                        alt="Offline animated preview"
+                        className="mt-3 w-full rounded-xl border border-slate-700"
+                      />
+                    </div>
+                  ) : (
+                    <div className="mt-4 rounded-2xl border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-200">
+                      <p className="font-medium">No video output was produced</p>
+                      <p className="mt-1">{creativeResult.video?.render_error || creativeResult.video?.tts_error || 'Video rendering failed. Check the backend logs and try again.'}</p>
+                    </div>
+                  )}
+
+                  {(creativeResult.video?.render_error || creativeResult.video?.tts_error) && (
+                    <div className="mt-3 rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-200">
+                      {creativeResult.video?.tts_error && <p>Narration failed: {creativeResult.video.tts_error}</p>}
+                      {creativeResult.video?.render_error && <p>MP4 render failed: {creativeResult.video.render_error}</p>}
+                    </div>
+                  )}
+
+                  {creativeResult.video?.thumbnail_url && (
+                    <div className="mt-4">
+                      <p className="text-xs uppercase tracking-[0.18em] text-slate-400">Thumbnail</p>
+                      <img
+                        src={`${API_BASE_URL}${creativeResult.video.thumbnail_url}`}
+                        alt="Generated video thumbnail"
+                        className="mt-2 h-40 w-full rounded-2xl border border-slate-700 object-cover"
+                      />
+                    </div>
+                  )}
+
+                  <div className="mt-4 space-y-1.5 rounded-2xl border border-slate-800 bg-slate-950/60 p-3 text-sm text-slate-200">
+                    {creativeResult.video?.duration_seconds != null && (
+                      <p>Duration: {Math.round(creativeResult.video.duration_seconds)}s</p>
+                    )}
+                    {creativeResult.video?.video_width != null && (
+                      <p>Resolution: {creativeResult.video.video_width}x{creativeResult.video.video_height}</p>
+                    )}
+                    <p>Audio narration: {creativeResult.video?.audio_enabled ? 'Enabled (offline TTS)' : 'Not available'}</p>
+                    <p>Render engine: {creativeResult.video?.render_engine || 'unknown'}</p>
+                    {creativeResult.video?.subtitle_url && (
+                      <p>
+                        Subtitles:{' '}
+                        <a
+                          href={`${API_BASE_URL}${creativeResult.video.subtitle_url}`}
+                          target="_blank"
+                          rel="noreferrer"
+                          className="text-cyan-300 underline"
+                        >
+                          Download SRT
+                        </a>
+                      </p>
+                    )}
+                    {creativeResult.video?.script_sufficient === false && (
+                      <p className="text-amber-200">Script is short for a 60-90s video - edit or regenerate it for a longer narration.</p>
+                    )}
+                    <p className="text-xs text-slate-400">{creativeResult.video?.limits}</p>
                   </div>
                 </div>
               </section>
@@ -1137,10 +1510,46 @@ function App() {
                         <div className="flex items-start justify-between gap-3">
                           <div>
                             <p className="font-medium text-white">{item.title}</p>
-                            <p className="mt-1 text-xs uppercase tracking-[0.18em] text-violet-300">{item.platform} · {item.status}</p>
+                            <p className="mt-1 text-xs uppercase tracking-[0.18em] text-violet-300">{item.platform} Â· {item.status}</p>
                           </div>
                           <span className="rounded-full border border-slate-700 bg-slate-900 px-2 py-1 text-[10px] uppercase tracking-[0.18em] text-slate-200">{item.status}</span>
                         </div>
+
+                        {item.media_url && item.media_url.toLowerCase().includes('.mp4') && (
+                          <video
+                            key={item.media_url}
+                            src={`${API_BASE_URL}${item.media_url}`}
+                            controls
+                            playsInline
+                            className="mt-3 w-full rounded-xl border border-slate-700 bg-black"
+                          />
+                        )}
+
+                        {item.thumbnail_url && (
+                          <img
+                            src={`${API_BASE_URL}${item.thumbnail_url}`}
+                            alt="Content thumbnail"
+                            className="mt-3 h-32 w-full rounded-xl border border-slate-700 object-cover"
+                          />
+                        )}
+
+                        <p className="mt-3 text-sm text-slate-200">{item.content}</p>
+                        {item.script && (
+                          <details className="mt-2 rounded-xl border border-slate-800 bg-slate-900/60 p-2 text-xs text-slate-300">
+                            <summary className="cursor-pointer text-slate-200">Narration script</summary>
+                            <p className="mt-2 whitespace-pre-wrap">{item.script}</p>
+                          </details>
+                        )}
+                        {item.subtitle_url && (
+                          <a
+                            href={`${API_BASE_URL}${item.subtitle_url}`}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="mt-2 inline-block text-xs text-cyan-300 underline"
+                          >
+                            View subtitles (SRT)
+                          </a>
+                        )}
 
                         {item.validation_errors?.length > 0 && (
                           <ul className="mt-3 list-inside list-disc text-sm text-red-200">
@@ -1202,12 +1611,13 @@ function App() {
                 <button type="submit" className="rounded-xl bg-gradient-to-r from-cyan-500 to-violet-600 px-4 py-2.5 text-sm font-semibold text-white shadow-lg shadow-cyan-950/30">Schedule</button>
               </form>
 
-              <div className="mt-6 grid gap-4 md:grid-cols-7">
+              <div className={`mt-6 grid gap-4 ${scheduleView === 'daily' ? 'md:grid-cols-1' : 'md:grid-cols-7'}`}>
                 {calendarDays.map((day) => {
                   const key = day.toISOString().slice(0, 10);
                   const itemsForDay = scheduledItems.filter((item) => {
                     if (!item.scheduled_for) return false;
-                    return new Date(item.scheduled_for).toISOString().slice(0, 10) === key;
+                    const scheduledDate = parseUtcDate(item.scheduled_for);
+                    return scheduledDate?.toISOString().slice(0, 10) === key;
                   });
 
                   return (
@@ -1223,8 +1633,8 @@ function App() {
                               <p className="font-medium">{item.title}</p>
                               <p className="mt-1 text-violet-200">{item.platform}</p>
                               <div className="mt-2 flex gap-2">
-                                <button type="button" onClick={() => { setScheduleContentId(String(item.id)); setScheduleDateTime(new Date(item.scheduled_for).toISOString().slice(0, 16)); }} className="rounded-md border border-slate-700 px-2 py-1 text-[10px] text-slate-200">Edit</button>
-                                <button type="button" onClick={async () => { await cancelSchedule(item.id); await refreshQueue(); }} className="rounded-md border border-red-500/40 px-2 py-1 text-[10px] text-red-200">Cancel</button>
+                                <button type="button" onClick={() => { setScheduleContentId(String(item.id)); setScheduleDateTime(toLocalInputValue(item.scheduled_for)); }} className="rounded-md border border-slate-700 px-2 py-1 text-[10px] text-slate-200">Edit</button>
+                                <button type="button" onClick={() => handleCancelSchedule(item.id)} className="rounded-md border border-red-500/40 px-2 py-1 text-[10px] text-red-200">Cancel</button>
                               </div>
                             </div>
                           ))

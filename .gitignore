@@ -26,3 +26,35 @@ __pycache__/
 # Generated files
 backend/app/generated/*
 backend/app/uploads/*
+
+# Browser service secrets and generated files
+browser_service/.env
+browser_service/.venv/
+
+# AI coding assistant history
+.aider*
+.aider/
+
+# Backups and temporary files
+*.bak
+*.backup
+*.bak-*
+*.backup-*
+
+# Runtime logs and test outputs
+*.log
+*_out.txt
+*_err.txt
+audit*.txt
+tts_probe*.txt
+video_*.txt
+coffee_*.txt
+demo_out.txt
+e2e_out.txt
+pytest_*.txt
+
+# Generated media
+backend/generated/
+
+# Accidental runtime output
+backend/Narration with invalid output
